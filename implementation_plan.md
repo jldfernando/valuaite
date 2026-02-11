@@ -91,22 +91,27 @@ __Expansion for Philippine (PH) Companies__
 ```
 valuation-ai-agent/
 ├── app/
-│   ├── main.py              # Streamlit UI with HITL triggers
+│   ├── main.py              # Streamlit Chat-First Entry Point
 │   ├── agent/
-│   │   ├── graph.py         # LangGraph logic
-│   │   ├── nodes.py         # Node logic
-│   │   └── state.py         # State schema
+│   │   ├── graph.py         # LangGraph state machine & logic
+│   │   ├── nodes.py         # Node logic (LLM Prompts & Routing)
+│   │   └── state.py         # State schema (TypedDict/Pydantic)
 │   ├── tools/
-│   │   ├── calculators.py   # DCF, Multiples, and Asset-Based (NAV) logic
-│   │   └── parser.py        # PDF/Excel extraction
+│   │   ├── finance.py       # Data fetching (yfinance wrappers)
+│   │   ├── calculators.py   # Math Engine (DCF, Multiples, NAV)
+│   │   └── parser.py        # PDF extraction logic (Expansion)
 │   └── utils/
-│       └── moderation.py    # Guardrail implementation
+│       └── moderation.py    # Guardrail & Disclaimer implementation
+│       └── visuals.py       # Plotly/Altair chart generation
+├── eval/
+│   ├── gold_set.json        # Benchmark valuation targets
+│   └── run_eval.py          # RAGAS evaluation script
 ├── Dockerfile
 ├── requirements.txt
 └── .env
 ```
 
-8. Flowchart
+## 8. Flowchart
 ```
 graph TD
     %% Starting Point
@@ -171,3 +176,22 @@ graph TD
     
     style Engine Calculations fill:#ECEFF1,stroke:#607D8B,stroke-dasharray: 5 5,color:#000
 ```
+
+## 9. Development Roadmap (Phased Approach)
+
+* Phase 1: US Prototype (Current Priority)
+    * Implement calculators.py and finance.py.
+    * Build simple LangGraph flow: Data -> Engine -> Synthesis.
+    * Basic Chat UI in Streamlit.
+
+* Phase 2: Human-in-the-Loop & Interactive Logic
+    * Implement LangGraph interrupts.
+    * Add "Assumption Recommender" and "Advanced Logic" (Moving Averages).
+
+* Phase 3: Visuals & Guardrails
+    * Add Football Field and Sensitivity Heatmap charts.
+    * Implement Pydantic-based guardrails.
+
+* Phase 4: Expansion
+    * Integrate PH Market PDF RAG.
+    * Execute RAGAS-based accuracy testing.
