@@ -18,7 +18,7 @@ An AI-powered financial co-pilot built with LangGraph and Gemini 2.0 Flash. This
 
 * Orchestration: LangGraph
 
-* Brains: Multi-LLM support (Gemini 1.5/2.0, Groq Llama 3.3, Mistral Large)
+* Brains: Multi-LLM support (Gemini 1.5/2.0, Groq Llama 3.3, Mistral Large, OpenAI GPT-4o)
 
 * UI: Streamlit
 

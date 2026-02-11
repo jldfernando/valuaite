@@ -19,7 +19,7 @@ with st.sidebar:
     # Provider Selection
     provider = st.selectbox(
         "Select LLM Provider:",
-        ["Gemini", "Groq", "Mistral"],
+        ["Gemini", "Groq", "Mistral", "OpenAI"],
         index=0
     )
     
@@ -33,6 +33,9 @@ with st.sidebar:
     elif provider == "Mistral":
         st.info("Using Mistral (Mistral Large)")
         api_key_field = "MISTRAL_API_KEY"
+    elif provider == "OpenAI":
+        st.info("Using OpenAI (GPT-4o-mini)")
+        api_key_field = "OPENAI_API_KEY"
     
     # API Key Input
     if not os.getenv(api_key_field):

@@ -7,7 +7,7 @@ This document provides a detailed technical roadmap for building an AI-powered f
 | Component | Technology | Reasoning |
 | :--- | :--- | :--- |
 | **Agent Framework** | LangGraph | Provides cyclic, stateful orchestration with built-in "interrupt" support for Human-in-the-Loop. |
-| **LLMs** | Gemini, Groq, Mistral | **Multi-Provider Support**: Switch between Gemini (reasoning), Groq (speed), or Mistral (accuracy) dynamically via a factory. |
+| **LLMs** | Gemini, Groq, Mistral, OpenAI | **Multi-Provider Support**: Switch between Gemini (reasoning), Groq (speed), Mistral (accuracy), or OpenAI (reliability) dynamically via a factory. |
 | **Frontend** | Streamlit | Efficiently handles interactive tables, sliders for HITL inputs, and financial charts. |
 | **Primary Data** | yfinance | Reliable API for US-based historical financials, stock prices, and analyst estimates. |
 | **Local Data (PH)** | PyPDF2 / Pandas | Tools to parse SEC Form 17-A/Q (PH) and user-uploaded valuation models in Excel. |
