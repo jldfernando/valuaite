@@ -15,7 +15,7 @@ st.set_page_config(
 # Sidebar - Settings & About
 with st.sidebar:
     st.title("Settings")
-    st.info("This agent uses Gemini 2.0 Flash to perform financial analysis.")
+    st.info("This agent uses Gemini 2.5 Flash Lite to perform financial analysis.")
     if not os.getenv("GOOGLE_API_KEY"):
         api_key = st.text_input("Enter Google API Key:", type="password")
         if api_key:
@@ -74,18 +74,42 @@ if prompt := st.chat_input("Ask about a stock (e.g., 'Valuate AAPL')"):
                 # If there are valuation results, show them in a neat expando
                 if "valuation_results" in final_state:
                     res = final_state["valuation_results"]
+                    assump = final_state.get("assumptions", {})
+                    
                     with st.expander("📊 View Detailed Calculation Data"):
-                        col1, col2, col3 = st.columns(3)
+                        st.subheader("Implied Valuation Prices")
+                        col1, col2, col3, col4 = st.columns(4)
                         with col1:
-                            st.metric("DCF Implied Price", f"${res['dcf']['implied_share_price']:.2f}")
+                            st.metric("DCF Implied Price", f"${res['dcf'].get('implied_share_price', 0):.2f}")
                         with col2:
                             pe_price = res['multiples'].get('pe_implied_price', 0)
                             st.metric("PE Implied Price", f"${pe_price:.2f}")
                         with col3:
-                            st.metric("NAV Per Share", f"${res['nav']['nav_per_share']:.2f}")
+                            st.metric("NAV Per Share", f"${res['nav'].get('nav_per_share', 0):.2f}")
+                        with col4:
+                            liq_price = res['liquidation'].get('liquidation_per_share', 0)
+                            st.metric("Liquidation (Floor)", f"${liq_price:.2f}")
                         
                         st.divider()
-                        st.json(res)
+                        
+                        st.subheader("Key Model Assumptions")
+                        acol1, acol2, acol3, acol4 = st.columns(4)
+                        with acol1:
+                            st.metric("WACC (Calculated)", f"{res.get('calculated_wacc', 0):.2%}")
+                        with acol2:
+                            st.metric("Equity Risk Premium", f"{assump.get('equity_risk_premium', 0):.2%}")
+                        with acol3:
+                            st.metric("Risk-Free Rate", f"{assump.get('risk_free_rate', 0):.2%}")
+                        with acol4:
+                            st.metric("Forward Growth", f"{assump.get('forward_growth', 0):.2%}")
+                        
+                        with st.container():
+                            st.caption(f"**Peers used for relative valuation:** {', '.join(assump.get('peers', []))}")
+                            st.caption(f"**Inventory/Receivables Haircuts:** {assump.get('haircuts', [0,0])}")
+
+                        st.divider()
+                        with st.expander("Raw State Data (JSON)"):
+                            st.json(final_state)
 
                 # Output final analysis
                 st.markdown(response)
