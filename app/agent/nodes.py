@@ -18,27 +18,28 @@ load_dotenv()
 
 # Initialize LLM with 0 retries to prevent quota 'leaking' during rate limits
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash", 
+    model="gemini-2.5-flash-lite", 
     google_api_key=os.getenv("GOOGLE_API_KEY"),
     max_retries=0
 )
 
 def input_guardrail_node(state: ValuationState) -> Dict[str, Any]:
     """Checks if the query is financial and valid."""
-    print("--- [NODE] input_guardrail_node ---")
+    print("\n--- [NODE] input_guardrail_node ---")
     
-    # Secure API Key Check
     if not os.getenv("GOOGLE_API_KEY"):
-        print("ERROR: GOOGLE_API_KEY not found in environment.")
-        return {"errors": ["API Key missing. Please set GOOGLE_API_KEY in your .env file."], "current_step": "error"}
+        err_msg = "AUTHENTICATION_ERROR: GOOGLE_API_KEY not found."
+        print(f"ERROR: {err_msg}")
+        return {"errors": [err_msg], "current_step": "error"}
 
     messages = state.get("messages", [])
     if not messages:
-        print("ERROR: No messages found in state.")
-        return {"errors": ["Empty user message."], "current_step": "error"}
+        err_msg = "INPUT_ERROR: No messages found in state."
+        print(f"ERROR: {err_msg}")
+        return {"errors": [err_msg], "current_step": "error"}
 
     last_message = messages[-1]["content"] if isinstance(messages[-1], dict) else messages[-1].content
-    print(f"User Message: {last_message}")
+    print(f"User Query: '{last_message}'")
     
     prompt = f"""
     Analyze the user query: "{last_message}"
@@ -50,54 +51,75 @@ def input_guardrail_node(state: ValuationState) -> Dict[str, Any]:
     TICKER: [TICKER/NONE]
     """
     
-    # Use HumanMessage as it's more universally supported across Gemini API versions
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
-        res_text = response.content
-        print(f"Guardrail Response: {res_text.strip()}")
+        res_text = response.content.strip()
+        
     except Exception as e:
-        print(f"LLM Invoke Error: {e}")
-        return {"errors": [f"LLM Error: {str(e)}"], "current_step": "error"}
+        err_type = type(e).__name__
+        err_msg = f"LLM_INVOKE_ERROR ({err_type}): {str(e)}"
+        print(f"ERROR: {err_msg}")
+        return {"errors": [err_msg], "current_step": "error"}
     
     if "INVALID" in res_text:
-        return {"errors": [res_text], "current_step": "error"}
+        print(f"REJECTION: {res_text}")
+        return {"errors": [f"GUARDRAIL_REJECTION: {res_text}"], "current_step": "error"}
         
-    # Extract ticker
-    ticker = "UNKNOWN"
-    if "TICKER:" in res_text:
-        ticker = res_text.split("TICKER:")[1].strip().split("\n")[0].upper()
-        if ticker == "NONE": ticker = "UNKNOWN"
-    
-    print(f"Extracted Ticker: {ticker}")
+    # Extraction with error handling
+    try:
+        ticker = "UNKNOWN"
+        if "TICKER:" in res_text:
+            ticker = res_text.split("TICKER:")[1].strip().split("\n")[0].upper()
+            if ticker == "NONE": ticker = "UNKNOWN"
+        print(f"Success: Ticker '{ticker}' identified.")
+    except Exception as e:
+        err_msg = f"PARSING_ERROR: Could not extract ticker from response. {str(e)}"
+        print(f"ERROR: {err_msg}")
+        return {"errors": [err_msg], "current_step": "error"}
+
     return {"ticker": ticker, "current_step": "data_retrieval"}
 
 
 def data_retrieval_node(state: ValuationState) -> Dict[str, Any]:
     """Fetches raw data for the target company."""
-    print("--- [NODE] data_retrieval_node ---")
+    print("\n--- [NODE] data_retrieval_node ---")
     ticker = state["ticker"]
-    print(f"Fetching data for: {ticker}")
+    print(f"Executing finance tools for: {ticker}")
+    
     if ticker == "UNKNOWN":
-        return {"errors": ["No ticker identified. Please provide a stock symbol (e.g., AAPL)."]}
+        err_msg = "VALUATION_ERROR: No valid ticker found. Cannot proceed with data retrieval."
+        print(f"ERROR: {err_msg}")
+        return {"errors": [err_msg]}
         
-    data = get_company_data(ticker)
-    if "error" in data:
-        print(f"Error fetching data: {data['error']}")
-        return {"errors": [data["error"]]}
+    try:
+        data = get_company_data(ticker)
+        if "error" in data:
+            err_msg = f"FINANCE_TOOL_ERROR: {data['error']}"
+            print(f"ERROR: {err_msg}")
+            return {"errors": [err_msg]}
         
-    print("Successfully fetched company data.")
-    return {
-        "company_data": data,
-        "current_step": "assumption_recommender"
-    }
+        print("Success: Company financials retrieved.")
+        return {
+            "company_data": data,
+            "current_step": "assumption_recommender"
+        }
+    except Exception as e:
+        err_msg = f"RUNTIME_ERROR (DataRetrieval): {str(e)}"
+        print(f"ERROR: {err_msg}")
+        return {"errors": [err_msg]}
+
 
 def assumption_recommender_node(state: ValuationState) -> Dict[str, Any]:
     """LLM suggests WACC and Growth based on company data."""
-    print("--- [NODE] assumption_recommender_node ---")
+    print("\n--- [NODE] assumption_recommender_node ---")
     data = state["company_data"]
-    rf_rate = get_risk_free_rate()
-    print(f"Current Risk-Free Rate: {rf_rate}")
     
+    try:
+        rf_rate = get_risk_free_rate()
+    except Exception as e:
+        print(f"WARNING: Risk-free rate tool failed. Using fallback 0.045. Error: {e}")
+        rf_rate = 0.045
+
     prompt = f"""
     Target: {state['ticker']}
     Sector: {data['market_info']['sector']}
@@ -116,25 +138,30 @@ def assumption_recommender_node(state: ValuationState) -> Dict[str, Any]:
     PEERS: [TICKER1, TICKER2, ...]
     """
     
-    # Use HumanMessage for consistency
-    response = llm.invoke([HumanMessage(content=prompt)])
-    res_text = response.content
-    print(f"LLM Assumptions: {res_text.strip()}")
-    
-    # Simple extraction logic
     try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        res_text = response.content.strip()
+        print(f"LLM Response Raw: {res_text}")
+        
+        # Extraction logic with fallback
         wacc = float(res_text.split("WACC:")[1].strip().split("\n")[0])
         tg = float(res_text.split("TERMINAL_GROWTH:")[1].strip().split("\n")[0])
         peers = [p.strip() for p in res_text.split("PEERS:")[1].strip().split(",")]
+        print(f"Success: Assumptions generated (WACC: {wacc}, TG: {tg})")
+        
     except Exception as e:
-        print(f"Error parsing assumptions: {e}")
-        # Fallbacks
+        err_msg = f"LLM_ASSUMPTION_ERROR: Failed to generate/parse assumptions. {str(e)}"
+        print(f"ERROR: {err_msg}. Using conservative fallbacks.")
         wacc, tg, peers = 0.09, 0.02, []
+        # We don't necessarily 'fail' here, we can fallback to run the engine
 
-    print(f"Parsed -> WACC: {wacc}, TG: {tg}, Peers: {peers}")
     # Fetch Peer Data
-    peer_multiples = get_peer_multiples(peers) if peers else {}
-    print(f"Fetched Multiples for {len(peers)} peers.")
+    print(f"Fetching peer multiples for: {peers}")
+    try:
+        peer_multiples = get_peer_multiples(peers) if peers else {}
+    except Exception as e:
+        print(f"WARNING: Peer multiples tool failed. {e}")
+        peer_multiples = {}
 
     return {
         "assumptions": {
@@ -147,21 +174,21 @@ def assumption_recommender_node(state: ValuationState) -> Dict[str, Any]:
         "current_step": "financial_engine"
     }
 
+
 def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
     """Performs the actual math using calculators.py."""
-    print("--- [NODE] financial_engine_node ---")
+    print("\n--- [NODE] financial_engine_node ---")
     data = state["company_data"]
     assump = state["assumptions"]
     
     # 1. DCF
-    # Use the most recent FCF (Operating - Capex)
     try:
         recent_fcf = data["cash_flow"]["operating_cash_flow"][0] + data["cash_flow"]["capital_expenditures"][0]
-        print(f"Calculating DCF with Base FCF: {recent_fcf}")
+        print(f"Running DCF Math (FCF: {recent_fcf}, WACC: {assump['wacc']})")
         
         dcf_res = calculate_dcf(
             fcf_base=recent_fcf,
-            growth_rates=0.05, # Simple 5% growth fallback for protype
+            growth_rates=0.05,
             wacc=assump["wacc"],
             terminal_growth=assump["terminal_growth"],
             shares_outstanding=data["market_info"]["shares_outstanding"],
@@ -169,11 +196,10 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
             debt=data["balance_sheet"]["total_debt"]
         )
     except Exception as e:
-        print(f"DCF Calculation Error: {e}")
-        dcf_res = {"implied_share_price": 0}
+        print(f"MATH_ERROR (DCF): {e}")
+        dcf_res = {"implied_share_price": 0, "error": str(e)}
 
     # 2. Multiples
-    # Prepare metrics
     try:
         target_metrics = {
             "earnings": data["income_statement"]["net_income"][0],
@@ -181,7 +207,7 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
             "ebitda": data["income_statement"]["ebitda"][0],
             "net_income_growth": 0.05 
         }
-        print(f"Calculating Multiples for Target Metrics: {target_metrics}")
+        print(f"Running Multiples Math (Earnings: {target_metrics['earnings']})")
         
         multi_res = calculate_multiples_valuation(
             target_metrics=target_metrics,
@@ -189,12 +215,12 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
             shares_outstanding=data["market_info"]["shares_outstanding"]
         )
     except Exception as e:
-        print(f"Multiples Calculation Error: {e}")
-        multi_res = {}
+        print(f"MATH_ERROR (Multiples): {e}")
+        multi_res = {"error": str(e)}
     
     # 3. NAV
     try:
-        print("Calculating NAV...")
+        print("Running NAV Math")
         nav_res = calculate_nav(
             total_assets=data["balance_sheet"]["total_assets"],
             total_liabilities=data["balance_sheet"]["total_liabilities"],
@@ -202,8 +228,8 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
             shares_outstanding=data["market_info"]["shares_outstanding"]
         )
     except Exception as e:
-        print(f"NAV Calculation Error: {e}")
-        nav_res = {"nav_per_share": 0}
+        print(f"MATH_ERROR (NAV): {e}")
+        nav_res = {"nav_per_share": 0, "error": str(e)}
     
     return {
         "valuation_results": {
@@ -214,32 +240,40 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
         "current_step": "analysis_synthesis"
     }
 
+
 def analysis_synthesis_node(state: ValuationState) -> Dict[str, Any]:
     """LLM summarizes the findings."""
-    print("--- [NODE] analysis_synthesis_node ---")
+    print("\n--- [NODE] analysis_synthesis_node ---")
     results = state["valuation_results"]
     ticker = state["ticker"]
-    curr_price = state["company_data"]["market_info"]["current_price"]
     
-    prompt = f"""
-    Subject: {ticker} Business Valuation Summary
-    Current Price: ${curr_price}
-    
-    Intrinsic (DCF) Implied Price: ${results['dcf']['implied_share_price']:.2f}
-    Relative (PE) Implied Price: ${results['multiples'].get('pe_implied_price', 0):.2f}
-    Asset-Based (NAV) Per Share: ${results['nav']['nav_per_share']:.2f}
-    
-    Analyze these results. Is the stock potentially undervalued or overvalued? 
-    Consider the margin of safety. Provide a concise financial summary for an investor.
-    """
-    
-    print("Generating final summary with LLM...")
-    response = llm.invoke([HumanMessage(content=prompt)])
-    print("Final report generated.")
-    
-    return {
-        "analysis_report": response.content,
-        "messages": [{"role": "assistant", "content": response.content}],
-        "current_step": "complete"
-    }
+    try:
+        curr_price = state["company_data"]["market_info"]["current_price"]
+        
+        prompt = f"""
+        Subject: {ticker} Business Valuation Summary
+        Current Price: ${curr_price}
+        
+        Intrinsic (DCF) Implied Price: ${results['dcf'].get('implied_share_price', 0):.2f}
+        Relative (PE) Implied Price: ${results['multiples'].get('pe_implied_price', 0):.2f}
+        Asset-Based (NAV) Per Share: ${results['nav'].get('nav_per_share', 0):.2f}
+        
+        Analyze these results. Is the stock potentially undervalued or overvalued? 
+        Consider the margin of safety. Provide a concise financial summary for an investor.
+        """
+        
+        print("Synthesizing final report with LLM...")
+        response = llm.invoke([HumanMessage(content=prompt)])
+        print("Success: Final report generated.")
+        
+        return {
+            "analysis_report": response.content,
+            "messages": [{"role": "assistant", "content": response.content}],
+            "current_step": "complete"
+        }
+    except Exception as e:
+        err_msg = f"SYNTHESIS_ERROR: Failed to generate report. {str(e)}"
+        print(f"ERROR: {err_msg}")
+        return {"errors": [err_msg], "current_step": "error"}
+
 
