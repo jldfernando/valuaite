@@ -15,11 +15,37 @@ st.set_page_config(
 # Sidebar - Settings & About
 with st.sidebar:
     st.title("Settings")
-    st.info("This agent uses Gemini 2.5 Flash Lite to perform financial analysis.")
-    if not os.getenv("GOOGLE_API_KEY"):
-        api_key = st.text_input("Enter Google API Key:", type="password")
+    
+    # Provider Selection
+    provider = st.selectbox(
+        "Select LLM Provider:",
+        ["Gemini", "Groq", "Mistral"],
+        index=0
+    )
+    
+    # Provider-specific settings
+    if provider == "Gemini":
+        st.info("Using Gemini 2.5 Flash Lite")
+        api_key_field = "GOOGLE_API_KEY"
+    elif provider == "Groq":
+        st.info("Using Groq (Llama 3.3 70B)")
+        api_key_field = "GROQ_API_KEY"
+    elif provider == "Mistral":
+        st.info("Using Mistral (Mistral Large)")
+        api_key_field = "MISTRAL_API_KEY"
+    
+    # API Key Input
+    if not os.getenv(api_key_field):
+        api_key = st.text_input(f"Enter {provider} API Key:", type="password")
         if api_key:
-            os.environ["GOOGLE_API_KEY"] = api_key
+            os.environ[api_key_field] = api_key
+    
+    # Store settings in session state
+    st.session_state.llm_config = {
+        "provider": provider,
+        "api_key": os.getenv(api_key_field)
+    }
+    
     st.divider()
     st.markdown("### Common Queries")
     st.caption("- Valuate Apple (AAPL)")
@@ -58,7 +84,8 @@ if prompt := st.chat_input("Ask about a stock (e.g., 'Valuate AAPL')"):
                     "messages": [{"role": "user", "content": prompt}],
                     "ticker": "UNKNOWN",
                     "errors": [],
-                    "current_step": "start"
+                    "current_step": "start",
+                    "config": st.session_state.get("llm_config", {"provider": "Gemini"})
                 }
                 
                 # Invoke Graph

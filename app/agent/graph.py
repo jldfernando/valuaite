@@ -1,24 +1,24 @@
 from langgraph.graph import StateGraph, START, END
 from agent.state import ValuationState
 from agent.nodes import (
-    input_guardrail_node,
+    ticker_extractor_node,
     data_retrieval_node,
-    assumption_recommender_node,
+    analyst_planner_node,
     financial_engine_node,
     analysis_synthesis_node
 )
 
-def route_after_guardrail(state: ValuationState):
-    """Routes to retrieval if valid, otherwise ends with error."""
-    if state.get("errors"):
+def route_after_extraction(state: ValuationState):
+    """Routes to retrieval if a ticker was found, otherwise ends."""
+    if state.get("errors") or state.get("ticker") == "UNKNOWN":
         return "END"
     return "data_retrieval"
 
 def route_after_retrieval(state: ValuationState):
-    """Routes to recommender if data found, otherwise ends."""
+    """Routes to planner if data found, otherwise ends."""
     if state.get("errors"):
         return "END"
-    return "assumption_recommender"
+    return "analyst_planner"
 
 def create_graph():
     """
@@ -27,19 +27,19 @@ def create_graph():
     workflow = StateGraph(ValuationState)
 
     # 1. Define Nodes
-    workflow.add_node("input_guardrail", input_guardrail_node)
+    workflow.add_node("ticker_extractor", ticker_extractor_node)
     workflow.add_node("data_retrieval", data_retrieval_node)
-    workflow.add_node("assumption_recommender", assumption_recommender_node)
+    workflow.add_node("analyst_planner", analyst_planner_node)
     workflow.add_node("financial_engine", financial_engine_node)
     workflow.add_node("analysis_synthesis", analysis_synthesis_node)
 
     # 2. Define Edges & Workflow
-    workflow.add_edge(START, "input_guardrail")
+    workflow.add_edge(START, "ticker_extractor")
     
     # Conditional routing to handle errors early
     workflow.add_conditional_edges(
-        "input_guardrail", 
-        route_after_guardrail,
+        "ticker_extractor", 
+        route_after_extraction,
         {
             "data_retrieval": "data_retrieval",
             "END": END
@@ -50,13 +50,13 @@ def create_graph():
         "data_retrieval",
         route_after_retrieval,
         {
-            "assumption_recommender": "assumption_recommender",
+            "analyst_planner": "analyst_planner",
             "END": END
         }
     )
 
-    # Linear flow for the engine and synthesis
-    workflow.add_edge("assumption_recommender", "financial_engine")
+    # Linear flow for the brain and math
+    workflow.add_edge("analyst_planner", "financial_engine")
     workflow.add_edge("financial_engine", "analysis_synthesis")
     workflow.add_edge("analysis_synthesis", END)
 

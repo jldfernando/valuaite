@@ -18,7 +18,7 @@ An AI-powered financial co-pilot built with LangGraph and Gemini 2.0 Flash. This
 
 * Orchestration: LangGraph
 
-* Brain: Gemini 2.5 Flash (via Google AI Studio)
+* Brains: Multi-LLM support (Gemini 1.5/2.0, Groq Llama 3.3, Mistral Large)
 
 * UI: Streamlit
 
@@ -33,7 +33,11 @@ An AI-powered financial co-pilot built with LangGraph and Gemini 2.0 Flash. This
 valuation-ai-agent/
 ├── app/
 │   ├── main.py              # Streamlit Entry Point
-│   ├── agent/               # LangGraph Logic
+│   ├── agent/               
+│   │   ├── graph.py         # LangGraph State Machine
+│   │   ├── nodes.py         # Agent Branching & Logic
+│   │   ├── state.py         # Typed State Schema
+│   │   └── llm_factory.py   # Multi-Provider LLM Wrapper (NEW)
 │   ├── tools/               # Data & Math Engines
 │   └── utils/               # Guardrails & Visuals
 ├── Dockerfile               # Containerization

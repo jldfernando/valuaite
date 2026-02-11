@@ -1,8 +1,11 @@
 from datetime import datetime
+import os
 from typing import Dict, Any, List
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from dotenv import load_dotenv
+
+from langchain_core.messages import HumanMessage
 from agent.state import ValuationState
+from agent.llm_factory import get_llm
 from tools.finance import get_company_data, get_peer_multiples, get_risk_free_rate
 from tools.calculators import (
     calculate_wacc, 
@@ -11,72 +14,37 @@ from tools.calculators import (
     calculate_nav, 
     calculate_liquidation_value
 )
-import os
-from dotenv import load_dotenv
 
 load_dotenv()
 
-# Initialize LLM with 0 retries to prevent quota 'leaking' during rate limits
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash-lite", 
-    google_api_key=os.getenv("GOOGLE_API_KEY"),
-    max_retries=0
-)
+def get_node_llm(state: ValuationState):
+    """Helper to get the configured LLM for the current node."""
+    config = state.get("config", {})
+    provider = config.get("provider", "Gemini")
+    model = config.get("model", None)
+    api_key = config.get("api_key", None)
+    return get_llm(provider=provider, model_name=model, api_key=api_key)
 
-def input_guardrail_node(state: ValuationState) -> Dict[str, Any]:
-    """Checks if the query is financial and valid."""
-    print("\n--- [NODE] input_guardrail_node ---")
+def ticker_extractor_node(state: ValuationState) -> Dict[str, Any]:
+    """Lightweight extraction of ticker from user query."""
+    print("\n--- [NODE] ticker_extractor_node ---")
     
-    if not os.getenv("GOOGLE_API_KEY"):
-        err_msg = "AUTHENTICATION_ERROR: GOOGLE_API_KEY not found."
-        print(f"ERROR: {err_msg}")
-        return {"errors": [err_msg], "current_step": "error"}
-
     messages = state.get("messages", [])
-    if not messages:
-        err_msg = "INPUT_ERROR: No messages found in state."
-        print(f"ERROR: {err_msg}")
-        return {"errors": [err_msg], "current_step": "error"}
-
     last_message = messages[-1]["content"] if isinstance(messages[-1], dict) else messages[-1].content
-    print(f"User Query: '{last_message}'")
     
-    prompt = f"""
-    Analyze the user query: "{last_message}"
-    Determine if this is a request for a business valuation or financial analysis.
-    If it is NOT financial, respond with 'INVALID: [Reason]'.
-    If it IS financial, identify the stock ticker if present.
-    Format your response as:
-    STATUS: [VALID/INVALID]
-    TICKER: [TICKER/NONE]
-    """
+    prompt = f"Extract only the stock ticker from this message: '{last_message}'. If none found, respond 'NONE'."
     
     try:
+        llm = get_node_llm(state)
         response = llm.invoke([HumanMessage(content=prompt)])
-        res_text = response.content.strip()
-        
+        ticker = response.content.strip().upper().replace("$", "").replace("TICKER:", "").strip()
+        if "NONE" in ticker or len(ticker) > 10: 
+            ticker = "UNKNOWN"
     except Exception as e:
-        err_type = type(e).__name__
-        err_msg = f"LLM_INVOKE_ERROR ({err_type}): {str(e)}"
-        print(f"ERROR: {err_msg}")
-        return {"errors": [err_msg], "current_step": "error"}
-    
-    if "INVALID" in res_text:
-        print(f"REJECTION: {res_text}")
-        return {"errors": [f"GUARDRAIL_REJECTION: {res_text}"], "current_step": "error"}
-        
-    # Extraction with error handling
-    try:
+        print(f"Ticker Extraction Failed: {e}")
         ticker = "UNKNOWN"
-        if "TICKER:" in res_text:
-            ticker = res_text.split("TICKER:")[1].strip().split("\n")[0].upper()
-            if ticker == "NONE": ticker = "UNKNOWN"
-        print(f"Success: Ticker '{ticker}' identified.")
-    except Exception as e:
-        err_msg = f"PARSING_ERROR: Could not extract ticker from response. {str(e)}"
-        print(f"ERROR: {err_msg}")
-        return {"errors": [err_msg], "current_step": "error"}
 
+    print(f"Extracted Ticker: {ticker}")
     return {"ticker": ticker, "current_step": "data_retrieval"}
 
 
@@ -84,98 +52,114 @@ def data_retrieval_node(state: ValuationState) -> Dict[str, Any]:
     """Fetches raw data for the target company."""
     print("\n--- [NODE] data_retrieval_node ---")
     ticker = state["ticker"]
-    print(f"Executing finance tools for: {ticker}")
     
     if ticker == "UNKNOWN":
-        err_msg = "VALUATION_ERROR: No valid ticker found. Cannot proceed with data retrieval."
+        err_msg = "VALUATION_ERROR: I couldn't identify a stock symbol. Please mention a ticker like 'AAPL' or 'TSLA'."
         print(f"ERROR: {err_msg}")
-        return {"errors": [err_msg]}
+        return {"errors": [err_msg], "current_step": "error"}
         
     try:
         data = get_company_data(ticker)
         if "error" in data:
-            err_msg = f"FINANCE_TOOL_ERROR: {data['error']}"
-            print(f"ERROR: {err_msg}")
-            return {"errors": [err_msg]}
+            return {"errors": [f"DATA_ERROR: {data['error']}"], "current_step": "error"}
         
-        print("Success: Company financials retrieved.")
         return {
             "company_data": data,
-            "current_step": "assumption_recommender"
+            "current_step": "analyst_planner"
         }
     except Exception as e:
-        err_msg = f"RUNTIME_ERROR (DataRetrieval): {str(e)}"
-        print(f"ERROR: {err_msg}")
-        return {"errors": [err_msg]}
+        return {"errors": [f"RUNTIME_ERROR: {str(e)}"], "current_step": "error"}
 
 
-def assumption_recommender_node(state: ValuationState) -> Dict[str, Any]:
-    """LLM suggests Growth and ERP based on company data."""
-    print("\n--- [NODE] assumption_recommender_node ---")
+def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
+    """The 'Brain' - Validates intent and sets the valuation strategy using retrieved data."""
+    print("\n--- [NODE] analyst_planner_node ---")
     data = state["company_data"]
+    user_query = state["messages"][-1]["content"] if isinstance(state["messages"][-1], dict) else state["messages"][-1].content
     
-    try:
-        rf_rate = get_risk_free_rate()
-    except Exception as e:
-        print(f"WARNING: Risk-free rate tool failed. Using fallback 0.045. Error: {e}")
-        rf_rate = 0.045
-
-    # Prepare historical context for LLM
+    # 1. Prepare historical context
     hist_rev = data["income_statement"]["revenue"]
     rev_growth = [(hist_rev[i] - hist_rev[i+1])/hist_rev[i+1] if hist_rev[i+1] != 0 else 0 for i in range(len(hist_rev)-1)]
     avg_hist_growth = sum(rev_growth)/len(rev_growth) if rev_growth else 0.05
+    
+    try:
+        rf_rate = get_risk_free_rate()
+    except:
+        rf_rate = 0.045
 
     prompt = f"""
-    Target: {state['ticker']} ({data['market_info']['sector']})
-    Avg Hist Revenue Growth: {avg_hist_growth:.2%}
-    Recent Revenue (5Y): {hist_rev}
-    Beta: {data['market_info']['beta']}
+    You are a Senior Equity Research Analyst.
+    User Question: "{user_query}"
+    
+    Company Data for {state['ticker']}:
+    - Sector: {data['market_info']['sector']}
+    - Beta: {data['market_info']['beta']}
+    - Avg Hist Growth: {avg_hist_growth:.2%}
+    - Recent Revenue: {hist_rev}
 
-    Task: Suggest realistic valuation assumptions.
-    1. 5-Year Forward Annual Revenue Growth Rate (as a decimal).
-    2. Terminal Growth Rate (usually 2-3% as a decimal).
-    3. Equity Risk Premium (ERP) - Standard is ~0.05-0.06.
-    4. Asset Haircuts (for liquidation): Suggest a decimal for 'uncollectible' inventory and receivables.
-    5. 3-5 Peer Tickers for relative valuation.
+    TASK:
+    1. VALIDATE: Is this question related to business valuation or financial health?
+    2. INTENT: Is this a "FULL_VALUATION" or a "QUICK_INQUIRY"?
+    3. STRATEGY: Suggest DCF growth, Equity Risk Premium (standard ~0.055), asset haircuts, and 4-6 peer tickers.
 
-    Format:
-    FORWARD_GROWTH: [value]
-    TERMINAL_GROWTH: [value]
-    ERP: [value]
-    HAIRCUTS: [inventory_haircut, receivables_haircut]
-    PEERS: [TICKER1, TICKER2, ...]
+    Your response MUST follow this exact format. Do NOT add any preamble, conversational filler, or introductory text. Respond ONLY with the data blocks below.
+    
+    VALID: [YES/NO]
+    INTENT: [FULL_VALUATION/QUICK_INQUIRY]
+    FORWARD_GROWTH: [decimal, e.g. 0.08]
+    ERP: [decimal, e.g. 0.055]
+    HAIRCUTS: [inventory_decimal, receivables_decimal]
+    PEERS: [TICKER1, TICKER2, TICKER3]
+    REASONING: [Brief explanation of your strategy]
     """
     
     try:
-        # Use HumanMessage for consistency
+        llm = get_node_llm(state)
         response = llm.invoke([HumanMessage(content=prompt)])
         res_text = response.content.strip()
-        print(f"LLM Response Raw: {res_text}")
-        
-        # Extraction logic
+        print(f"Planner Response: {res_text[:200]}...")
+
+        # Guardrail logic inside the planner
+        if "VALID: NO" in res_text:
+            return {"errors": ["I am specialized in financial valuations. Please ask a finance-related question."], "current_step": "error"}
+
+        # Extraction
         fg = float(res_text.split("FORWARD_GROWTH:")[1].strip().split("\n")[0])
-        tg = float(res_text.split("TERMINAL_GROWTH:")[1].strip().split("\n")[0])
         erp = float(res_text.split("ERP:")[1].strip().split("\n")[0])
         haircuts_raw = res_text.split("HAIRCUTS:")[1].strip().split("\n")[0].replace("[","").replace("]","")
         haircuts = [float(h.strip()) for h in haircuts_raw.split(",")]
-        peers = [p.strip() for p in res_text.split("PEERS:")[1].strip().split(",")]
-        
-    except Exception as e:
-        print(f"ERROR: Assumption extraction failed: {e}. Using defaults.")
-        fg, tg, erp, haircuts, peers = 0.05, 0.02, 0.055, [0.5, 0.2], []
+        peers = [p.strip() for p in res_text.split("PEERS:")[1].split("\n")[0].strip().split(",")]
+        reasoning = res_text.split("REASONING:")[1].strip().split("\n")[0]
+        intent = "FULL_VALUATION" if "FULL_VALUATION" in res_text else "QUICK_INQUIRY"
 
-    # Fetch Peer Data
-    print(f"Fetching peer multiples for: {peers}")
+        # Logging
+        print("\nPlanning results...")
+        print(f"Forward Growth: {fg:.2%}")
+        print(f"Equity Risk Premium: {erp:.2%}")
+        print(f"Haircuts: {haircuts}")
+        print(f"Peers: {peers}")
+        print(f"Intent: {intent}")
+        print(f"Risk Free Rate: {rf_rate:.2%}")
+        print(f"Reasoning: {reasoning}")
+
+    except Exception as e:
+        print(f"Planning Error: {e}. Using conservative defaults.")
+        fg, erp, haircuts, peers, intent, reasoning = 0.05, 0.055, [0.5, 0.2], [], "FULL_VALUATION", ""
+
+    # Fetch peers
     peer_multiples = get_peer_multiples(peers) if peers else {}
+    print("\nPeer multiples...")
+    print(f"Peer Multiples: {peer_multiples}")
 
     return {
         "assumptions": {
             "forward_growth": fg,
-            "terminal_growth": tg,
+            "terminal_growth": 0.025,
             "equity_risk_premium": erp,
             "haircuts": haircuts,
             "risk_free_rate": rf_rate,
-            "peers": peers
+            "peers": peers,
+            "intent": intent
         },
         "peer_data": peer_multiples,
         "current_step": "financial_engine"
@@ -204,6 +188,14 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
             market_cap=data["market_info"]["market_cap"],
             total_debt=total_debt
         )
+        print("\nWACC calculations...")
+        print(f"Risk Free Rate: {assump['risk_free_rate']:.2%}")
+        print(f"Beta: {data['market_info']['beta']:.2%}")
+        print(f"Equity Risk Premium: {assump['equity_risk_premium']:.2%}")
+        print(f"Cost of Debt: {cost_of_debt:.2%}")
+        print(f"Tax Rate: {data['income_statement']['tax_rate']:.2%}")
+        print(f"Market Cap: {data['market_info']['market_cap']:.2%}")
+        print(f"Total Debt: {total_debt:.2%}")
         print(f"Calculated WACC: {calculated_wacc:.2%}")
     except Exception as e:
         print(f"ERROR calculating WACC: {e}. Falling back to 9%.")
@@ -223,6 +215,15 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
             cash=data["balance_sheet"]["total_cash"],
             debt=total_debt
         )
+        print("\nDCF calculations...")
+        print(f"FCF Base: {recent_fcf:.2f}")
+        print(f"Growth Rates: {assump['forward_growth']:.2%}")
+        print(f"WACC: {calculated_wacc:.2%}")
+        print(f"Terminal Growth: {assump['terminal_growth']:.2%}")
+        print(f"Shares Outstanding: {data['market_info']['shares_outstanding']:.2f}")
+        print(f"Cash: {data['balance_sheet']['total_cash']:.2f}")
+        print(f"Debt: {total_debt:.2f}")
+        print(f"Implied Share Price: {dcf_res['implied_share_price']:.2f}")
     except Exception as e:
         print(f"MATH_ERROR (DCF): {e}")
         dcf_res = {"implied_share_price": 0, "error": str(e)}
@@ -240,6 +241,12 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
             peer_multiples=state["peer_data"],
             shares_outstanding=data["market_info"]["shares_outstanding"]
         )
+        print("\nMultiples calculations...")
+        print(f"Target Metrics: {target_metrics}")
+        print(f"Peer Multiples: {state['peer_data']}")
+        print(f"Shares Outstanding: {data['market_info']['shares_outstanding']:.2f}")
+        implied_pe_price = multi_res.get('pe_implied_price', 0)
+        print(f"Implied Share Price (PE): {implied_pe_price:.2f}")
     except Exception as e:
         print(f"MATH_ERROR (Multiples): {e}")
         multi_res = {"error": str(e)}
@@ -252,6 +259,13 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
             intangible_assets=data["balance_sheet"]["intangible_assets"],
             shares_outstanding=data["market_info"]["shares_outstanding"]
         )
+        print("\nAsset-Based calculations...")
+        print(f"Total Assets: {data['balance_sheet']['total_assets']:.2f}")
+        print(f"Total Liabilities: {data['balance_sheet']['total_liabilities']:.2f}")
+        print(f"Intangible Assets: {data['balance_sheet']['intangible_assets']:.2f}")
+        print(f"Shares Outstanding: {data['market_info']['shares_outstanding']:.2f}")
+        nav_price = nav_res.get('nav_per_share', 0)
+        print(f"Implied Share Price (NAV): {nav_price:.2f}")
         
         liq_res = calculate_liquidation_value(
             total_assets=data["balance_sheet"]["total_assets"],
@@ -262,6 +276,15 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
             receivables_haircut=assump["haircuts"][1],
             shares_outstanding=data["market_info"]["shares_outstanding"]
         )
+        print("\nLiquidation calculations...")
+        print(f"Total Assets: {data['balance_sheet']['total_assets']:.2f}")
+        print(f"Total Liabilities: {data['balance_sheet']['total_liabilities']:.2f}")
+        print(f"Inventory: {data['balance_sheet']['inventory']:.2f}")
+        print(f"Accounts Receivable: {data['balance_sheet']['accounts_receivable']:.2f}")
+        print(f"Inventory Haircut: {assump['haircuts'][0]:.2%}")
+        print(f"Receivables Haircut: {assump['haircuts'][1]:.2%}")
+        print(f"Shares Outstanding: {data['market_info']['shares_outstanding']:.2f}")
+        print(f"Implied Share Price: {liq_res['liquidation_per_share']:.2f}")
     except Exception as e:
         print(f"MATH_ERROR (Asset-Based): {e}")
         nav_res = {"nav_per_share": 0}
@@ -307,6 +330,7 @@ def analysis_synthesis_node(state: ValuationState) -> Dict[str, Any]:
         """
         
         print("Synthesizing final report with LLM...")
+        llm = get_node_llm(state)
         response = llm.invoke([HumanMessage(content=prompt)])
         print("Success: Final report generated.")
         

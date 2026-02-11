@@ -165,28 +165,31 @@ def calculate_nav(
     }
 
 def calculate_liquidation_value(
-    assets_dict: Dict[str, float],
+    total_assets: float,
     total_liabilities: float,
-    haircuts: Dict[str, float],
+    inventory: float,
+    accounts_receivable: float,
+    inventory_haircut: float,
+    receivables_haircut: float,
     shares_outstanding: float
 ) -> Dict[str, float]:
     """
     Calculates Liquidation Value by applying discounts (haircuts) to assets.
-    
-    Args:
-        assets_dict: {'cash': 100, 'receivables': 200, 'inventory': 300, 'fixed_assets': 500}
-        total_liabilities: Total liabilities to subtract.
-        haircuts: {'cash': 1.0, 'receivables': 0.8, 'inventory': 0.5, 'fixed_assets': 0.3}
-        shares_outstanding: Shares for per-share calculation.
     """
-    liquidated_assets = 0
-    for category, value in assets_dict.items():
-        discount = haircuts.get(category, 1.0) # Default to 1.0 (no discount) if not provided
-        liquidated_assets += value * discount
-        
+    # Liquidation Logic:
+    # 1. Take Total Assets
+    # 2. Subtract 'Haircuts' from Inventory and Receivables
+    # 3. Fixed Assets/Other are usually hit hard (let's assume 70% haircut for simplicity if not provided)
+    
+    inv_discount = inventory * inventory_haircut
+    rec_discount = accounts_receivable * receivables_haircut
+    
+    # Total liquidated value = total assets - specific discounts
+    liquidated_assets = total_assets - inv_discount - rec_discount
+    
     liquidation_value = liquidated_assets - total_liabilities
     
     return {
         "liquidation_value": liquidation_value,
-        "liquidation_value_per_share": liquidation_value / shares_outstanding if shares_outstanding > 0 else 0
+        "liquidation_per_share": liquidation_value / shares_outstanding if shares_outstanding > 0 else 0
     }

@@ -29,3 +29,5 @@ class ValuationState(TypedDict):
     # 7. Metadata
     current_step: str
     errors: List[str]
+    # 8. Runtime Configuration (LLM Provider, Keys, etc.)
+    config: Dict[str, Any]
