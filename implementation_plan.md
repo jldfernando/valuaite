@@ -23,7 +23,7 @@ __Agentic Workflow (Nodes):__
 
 1. Input Guardrail Node: Filters for non-financial queries and potential prompt injections.
 
-2. Router Node: Identifies the ticker and determines the valuation method: DCF, Relative, or Asset-Based.
+2. Intent & Source Router: Dual-purpose routing. 1) Determines valuation depth (Full vs. Single Metric) and 2) Selects Data Source (yfinance API vs. User-Uploaded PDF/SEC Filings).
 
 3. Data Retrieval Node: Fetches raw financials (Income Statement, Balance Sheet, Cash Flow) for the target and identified competitors.
 
@@ -184,9 +184,11 @@ graph TD
     * Build simple LangGraph flow: Data -> Engine -> Synthesis.
     * Basic Chat UI in Streamlit.
 
-* Phase 2: Human-in-the-Loop & Interactive Logic
-    * Implement LangGraph interrupts.
-    * Add "Assumption Recommender" and "Advanced Logic" (Moving Averages).
+* Phase 2: Intent & Source Routing & HITL
+    * Implement **Non-Linear Branching**: Allow the agent to skip nodes (e.g., skip DCF if only asking for P/E).
+    * Implement **Source Selection**: Logic to choose between API (yfinance) and Uploaded Files (PDF/Excel).
+    * Implement LangGraph interrupts for Human-in-the-Loop.
+    * Add "Assumption Recommender" overrides.
 
 * Phase 3: Visuals & Guardrails
     * Add Football Field and Sensitivity Heatmap charts.
