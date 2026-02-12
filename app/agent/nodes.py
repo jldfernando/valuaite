@@ -35,8 +35,13 @@ def ticker_extractor_node(state: ValuationState) -> Dict[str, Any]:
     prompt = f"""
     Analyze the user's latest request: "{last_message}"
     
-    1. VALUATION_QUALIFIED: Is this request related to business valuation, stock analysis, or financial modeling? (YES/NO)
-    2. TICKER_EXTRACTED: Extract any stock ticker mentioned (e.g., AAPL). If it's a company name without a ticker, provide the name.
+    1. VALUATION_QUALIFIED: Is this request even remotely related to business valuation, stock analysis, or financial modeling? 
+       - BE LENIENT. If there are typos (e.g., 'Microsft'), mark as YES.
+       - ONLY mark NO if it is completely unrelated (e.g., 'How to bake a cake').
+    
+    2. TICKER_EXTRACTED: Extract the stock ticker (e.g., AAPL). 
+       - If it's a company name, provide the name (fix obvious typos).
+       - If no entity is found, respond 'NONE'.
     
     Format:
     QUALIFIED: [YES/NO]
@@ -48,28 +53,43 @@ def ticker_extractor_node(state: ValuationState) -> Dict[str, Any]:
         response = llm.invoke([HumanMessage(content=prompt)])
         lines = response.content.strip().split("\n")
         
+        # --- VERBOSE LOGGING ---
+        print(f"[RAW JUDGEMENT]\n{response.content.strip()}")
+        
         qualified = "YES" in (lines[0] if len(lines) > 0 else "")
         raw_ticker = (lines[1] if len(lines) > 1 else "").replace("TICKER:", "").strip().upper()
         
+        print(f"[PARSED] Qualified: {qualified} | Extracted: {raw_ticker}")
+
         # 1. Scope Guardrail
         if not qualified:
+            print(">>> CRITICAL GUARDRAIL: Out of Scope query blocked.")
             msg = "I'm specialized in business valuation and financial analysis. I'd be happy to help you analyze a stock or valuate a company!"
             return sanitize_state({
                 "analysis_report": msg,
-                "current_step": "complete" # Exit early
+                "current_step": "complete"
             })
             
         # 2. Extract or Search
-        # Check if extracted 'ticker' is actually a valid ticker
         found_tickers = []
         if len(raw_ticker) <= 5 and verify_ticker(raw_ticker):
             found_tickers = [raw_ticker]
         elif raw_ticker != "NONE":
-            # It might be a name, let's search
             found_tickers = search_ticker(raw_ticker, lambda: get_node_llm(state))
-        print(f"Found tickers: {found_tickers}")
             
-        # 3. Handle Discovery Outcomes
+        # 3. Fuzzy Correction Loop (If first search failed)
+        if not found_tickers and raw_ticker != "NONE" and len(raw_ticker) > 2:
+            print(f">>> FUZZY FIX: No tickers found for '{raw_ticker}'. Checking for misspelling...")
+            spell_prompt = f"The user asked for '{raw_ticker}'. If this is a misspelling of a famous public company, respond with ONLY the correct name. Otherwise respond 'NONE'."
+            spell_fix = llm.invoke([HumanMessage(content=spell_prompt)]).content.strip().upper()
+            
+            if "NONE" not in spell_fix and spell_fix != raw_ticker:
+                print(f">>> RE-SEARCHING: Corrected '{raw_ticker}' to '{spell_fix}'")
+                found_tickers = search_ticker(spell_fix, lambda: get_node_llm(state))
+        
+        print(f"[FINAL SEARCH RESULTS]: {found_tickers}")
+
+        # 4. Handle Discovery Outcomes
         if not found_tickers:
             # Fallback: Maybe we already have a ticker in state and this is just a follow-up?
             if state.get("ticker") and state["ticker"] != "UNKNOWN":
@@ -85,11 +105,10 @@ def ticker_extractor_node(state: ValuationState) -> Dict[str, Any]:
             # Ambiguity detected!
             return sanitize_state({
                 "ticker_options": found_tickers,
-                "current_step": "interrupt_clarification" # We'll need to define this in graph
+                "current_step": "interrupt_clarification"
             })
             
         # Success: Single ticker found
-        print(f"Single ticker found: {found_tickers[0]}")
         return sanitize_state({
             "ticker": found_tickers[0],
             "ticker_options": [],

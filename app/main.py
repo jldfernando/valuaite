@@ -10,8 +10,8 @@ load_dotenv()
 
 # Page Config
 st.set_page_config(
-    page_title="Valuation AI Agent",
-    page_icon="🚀",
+    page_title="ValuAIte",
+    page_icon="♾️",
     layout="wide"
 )
 
@@ -337,9 +337,10 @@ with st.sidebar:
     st.caption("- Valuate Apple (AAPL)")
     st.caption("- What is Tesla's P/E ratio?")
     st.caption("- Analyze MSFT based on assets.")
+    st.markdown("Data from Yahoo Finance")
 
 # Main UI
-st.title("🚀 Business Valuation AI Agent")
+st.title("♾️ ValuAIte: Business Valuation AI Agent")
 st.markdown("---")
 
 # Initialize Chat History
