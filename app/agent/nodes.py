@@ -76,13 +76,21 @@ def data_retrieval_node(state: ValuationState) -> Dict[str, Any]:
 
 
 def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
-    """The 'Brain' - Validates intent and sets the valuation strategy using retrieved data."""
+    """The 'Brain' - Validates intent and sets the valuation strategy using retrieved data.
+    Now conversational: reviews entire chat history to handle feedback/arguments.
+    """
     print("\n--- [NODE] analyst_planner_node ---")
     data = state["company_data"]
-    user_query = (state["messages"][-1]["content"] if isinstance(state["messages"][-1], dict) 
-                  else state["messages"][-1].content)
     
-    # 1. Prepare historical context
+    # 1. Get full conversation context
+    messages = state.get("messages", [])
+    chat_transcript = ""
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        chat_transcript += f"{role.upper()}: {content}\n"
+
+    # 2. Prepare historical context
     hist_rev = data["income_statement"]["revenue"]
     rev_growth = [(hist_rev[i] - hist_rev[i+1])/hist_rev[i+1] if hist_rev[i+1] != 0 else 0 for i in range(len(hist_rev)-1)]
     avg_hist_growth = sum(rev_growth)/len(rev_growth) if rev_growth else 0.05
@@ -94,7 +102,9 @@ def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
 
     prompt = f"""
     You are a Senior Equity Research Analyst.
-    User Question: "{user_query}"
+    
+    CONVERSATION LOG:
+    {chat_transcript}
     
     Company Data for {state['ticker']}:
     - Sector: {data['market_info']['sector']}
@@ -103,21 +113,25 @@ def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
     - Recent Revenue: {hist_rev}
 
     TASK:
-    1. VALIDATE: Is this question related to finance, stock market, or company analysis? (YES/NO)
+    1. VALIDATE: Is the user's latest message related to finance or the valuation strategy? (YES/NO)
     2. INTENT: 
-       - Respond 'FULL_VALUATION' if the user asks for "value", "fair price", "intrinsic worth", "DCF", "PE valuation", "NAV", "liquidation", or a full report.
-       - Respond 'QUICK_INQUIRY' ONLY for simple data lookups (e.g., "What is the beta?", "Who are competitors?", "What sector is this?").
-       - If in doubt, default to 'FULL_VALUATION'.
-    3. STRATEGY: Suggest DCF growth, Equity Risk Premium (standard ~0.055), asset haircuts, and 4-6 peer tickers.
+       - Respond 'FULL_VALUATION' for modeling (DCF, PE, NAV) or if the user is providing FEEDBACK on your previous plan.
+       - Respond 'QUICK_INQUIRY' ONLY for simple lookups.
+    3. NEGOTIATE: Review the chat log. If the user challenged your previous assumptions (growth, peers, haircuts, beta, tax, etc.), either:
+       - ADAPT: Change your numbers to reflect their feedback.
+       - ARGUE: Briefly justify why your original number might be more accurate while still providing a middle-ground option.
 
     Output format (Strictly no other text):
     VALID: [YES/NO]
     INTENT: [FULL_VALUATION/QUICK_INQUIRY]
     FORWARD_GROWTH: [decimal, e.g. 0.08]
+    TERMINAL_GROWTH: [decimal, e.g. 0.02]
     ERP: [decimal, e.g. 0.055]
+    BETA: [decimal, e.g. 1.2]
+    TAX_RATE: [decimal, e.g. 0.21]
     HAIRCUTS: [inventory_decimal, receivables_decimal]
     PEERS: [TICKER1, TICKER2, TICKER3]
-    REASONING: [Brief explanation]
+    REASONING: [Conversational response addressing the user's latest point or justifying your model. Be specific about the numbers you chose.]
     """
     
     try:
@@ -137,15 +151,21 @@ def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
             return match.group(1).strip() if match else default
 
         intent = get_match(r"INTENT:\s*(FULL_VALUATION|QUICK_INQUIRY)", res_text, "FULL_VALUATION")
-        fg_match = get_match(r"FORWARD_GROWTH:\s*([\d\.-]+)", res_text, "0.05")
+        fg_match = get_match(r"FORWARD_GROWTH:\s*([\d\.-]+)", res_text, str(avg_hist_growth))
+        tg_match = get_match(r"TERMINAL_GROWTH:\s*([\d\.-]+)", res_text, "0.025")
         erp_match = get_match(r"ERP:\s*([\d\.-]+)", res_text, "0.055")
+        beta_match = get_match(r"BETA:\s*([\d\.-]+)", res_text, str(data["market_info"]["beta"]))
+        tax_match = get_match(r"TAX_RATE:\s*([\d\.-]+)", res_text, str(data["income_statement"]["tax_rate"]))
         haircuts_raw = get_match(r"HAIRCUTS:\s*\[?([\s\d\.,\.-]+)\]?", res_text, "0.1, 0.15")
         peers_raw = get_match(r"PEERS:\s*(.+)", res_text, "")
         reasoning = get_match(r"REASONING:\s*(.+)", res_text, "No reasoning provided.")
 
         # Cleanup values
         fg = float(fg_match)
+        tg = float(tg_match)
         erp = float(erp_match)
+        beta = float(beta_match)
+        tax = float(tax_match)
         haircuts = [float(h.strip()) for h in haircuts_raw.split(",")]
         
         # Clean peers using regex for ticker patterns (1-5 uppercase chars)
@@ -155,7 +175,10 @@ def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
         # Logging
         print("\nPlanning results...")
         print(f"Forward Growth: {fg:.2%}")
+        print(f"Terminal Growth: {tg:.2%}")
         print(f"Equity Risk Premium: {erp:.2%}")
+        print(f"Beta: {beta}")
+        print(f"Tax Rate: {tax:.2%}")
         print(f"Haircuts: {haircuts}")
         print(f"Peers: {peers}")
         print(f"Intent: {intent}")
@@ -174,12 +197,15 @@ def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
     return sanitize_state({
         "assumptions": {
             "forward_growth": fg,
-            "terminal_growth": 0.025,
+            "terminal_growth": tg,
             "equity_risk_premium": erp,
+            "beta": beta,
+            "tax_rate": tax,
             "haircuts": haircuts,
             "risk_free_rate": rf_rate,
             "peers": peers,
-            "intent": intent
+            "intent": intent,
+            "reasoning": reasoning
         },
         "peer_data": peer_multiples,
         "current_step": "financial_engine"
@@ -201,21 +227,21 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
         
         calculated_wacc = calculate_wacc(
             risk_free_rate=assump["risk_free_rate"],
-            beta=data["market_info"]["beta"],
+            beta=assump.get("beta", data["market_info"]["beta"]),
             equity_risk_premium=assump["equity_risk_premium"],
             cost_of_debt=cost_of_debt,
-            tax_rate=data["income_statement"]["tax_rate"],
+            tax_rate=assump.get("tax_rate", data["income_statement"]["tax_rate"]),
             market_cap=data["market_info"]["market_cap"],
             total_debt=total_debt
         )
         print("\nWACC calculations...")
         print(f"Risk Free Rate: {assump['risk_free_rate']:.2%}")
-        print(f"Beta: {data['market_info']['beta']:.2%}")
+        print(f"Beta (Negotiated): {assump.get('beta', data['market_info']['beta'])}")
         print(f"Equity Risk Premium: {assump['equity_risk_premium']:.2%}")
         print(f"Cost of Debt: {cost_of_debt:.2%}")
-        print(f"Tax Rate: {data['income_statement']['tax_rate']:.2%}")
-        print(f"Market Cap: {data['market_info']['market_cap']:.2%}")
-        print(f"Total Debt: {total_debt:.2%}")
+        print(f"Tax Rate (Negotiated): {assump.get('tax_rate', data['income_statement']['tax_rate']):.2%}")
+        print(f"Market Cap: {data['market_info']['market_cap']:.2f}")
+        print(f"Total Debt: {total_debt:.2f}")
         print(f"Calculated WACC: {calculated_wacc:.2%}")
     except Exception as e:
         print(f"ERROR calculating WACC: {e}. Falling back to 9%.")

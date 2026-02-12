@@ -24,11 +24,16 @@ def route_after_retrieval(state: ValuationState):
 def route_after_planner(state: ValuationState):
     """
     Routes to engine for full valuation, or directly to synthesis for quick inquiries.
-    Added keyword safety check to prevent accidental skips of critical math.
+    Added keyword safety check and 'REVISE' support for HITL negotiation.
     """
     if state.get("errors"):
         return "END"
     
+    # 0. Check for Rewind/Negotiation signal (set by UI)
+    if state.get("current_step") == "analyst_planner":
+        print(">>> Negotiation detected. Returning to analyst_planner.")
+        return "analyst_planner"
+
     # 1. Check Intent from the planner
     intent = state.get("assumptions", {}).get("intent", "FULL_VALUATION")
     
@@ -90,6 +95,7 @@ def create_graph():
         {
             "financial_engine": "financial_engine",
             "analysis_synthesis": "analysis_synthesis",
+            "analyst_planner": "analyst_planner",
             "END": END
         }
     )
