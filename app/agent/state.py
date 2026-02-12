@@ -7,6 +7,7 @@ class ValuationState(TypedDict):
     """
     # 1. Identification
     ticker: str
+    ticker_options: List[str] # For disambiguation (NEW)
     
     # 2. Data Storage (populated by Data Retrieval Node)
     company_data: Dict[str, Any]

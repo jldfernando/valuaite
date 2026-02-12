@@ -358,90 +358,111 @@ current_snapshot = valuation_agent.get_state(config)
 # 1. Handle Human-in-the-Loop Interrupts
 if current_snapshot.next:
     state_values = current_snapshot.values
-    assump = state_values.get("assumptions", {})
-    ticker = state_values.get("ticker", "Stock")
-
-    with st.chat_message("assistant"):
-        st.warning(f"🎯 **Strategy Checkpoint: {ticker} Blueprint**")
-        st.info(f"**Analyst Rationale:** {assump.get('reasoning', 'No reasoning provided.')}")
+    
+    # CASE A: Ticker Disambiguation (HITL)
+    if "data_retrieval" in current_snapshot.next:
+        ticker_opts = state_values.get("ticker_options", [])
         
-        with st.form("approval_form"):
-            st.write("### 🛠️ Modeling Levers")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.write("**Growth & Premium**")
-                new_growth = st.number_input("Forward Growth (%)", value=float(assump.get("forward_growth", 0.05)*100), step=0.5) / 100
-                new_term_growth = st.number_input("Terminal Growth (%)", value=float(assump.get("terminal_growth", 0.025)*100), step=0.1) / 100
-                new_erp = st.number_input("Equity Risk Premium (%)", value=float(assump.get("equity_risk_premium", 0.055)*100), step=0.1) / 100
-            with col2:
-                st.write("**WACC Inputs**")
-                new_rf = st.number_input("Risk-Free Rate (%)", value=float(assump.get("risk_free_rate", 0.045)*100), step=0.1) / 100
-                new_beta = st.number_input("Beta", value=float(assump.get("beta", 1.0)), step=0.05)
-                new_tax = st.number_input("Tax Rate (%)", value=float(assump.get("tax_rate", 0.25)*100), step=1.0) / 100
-            with col3:
-                st.write("**Global Settings**")
-                new_peers = st.text_input("Peer Tickers", value=", ".join(assump.get("peers", [])))
-                intent = st.selectbox("Depth", ["FULL_VALUATION", "QUICK_INQUIRY"], index=0 if assump.get("intent")=="FULL_VALUATION" else 1)
-                
-                h_inv, h_rec = assump.get("haircuts", [0.1, 0.15])
-                new_h_inv = st.slider("Inventory Haircut", 0.0, 1.0, float(h_inv))
-                new_h_rec = st.slider("Receivables Haircut", 0.0, 1.0, float(h_rec))
-            
-            feedback = st.text_area("💬 Feedback / Argument (Optional)", placeholder="e.g., 'I think 40% growth is too aggressive, let's use 20% instead.'")
-            
-            btn_col1, btn_col2 = st.columns(2)
-            with btn_col1:
-                submitted = st.form_submit_button("🚀 Approve & Execute Calculations")
-            with btn_col2:
-                negotiate = st.form_submit_button("🔄 Negotiate / Update Plan")
-            
-            if submitted:
-                # Update State with user overrides and move forward
-                new_assumptions = {
-                    **assump,
-                    "forward_growth": new_growth,
-                    "terminal_growth": new_term_growth,
-                    "equity_risk_premium": new_erp,
-                    "risk_free_rate": new_rf,
-                    "beta": new_beta,
-                    "tax_rate": new_tax,
-                    "peers": [p.strip().upper() for p in new_peers.split(",") if p.strip()],
-                    "haircuts": [new_h_inv, new_h_rec],
-                    "intent": intent
-                }
-                valuation_agent.update_state(config, {
-                    "assumptions": new_assumptions,
-                    "config": st.session_state.llm_config
-                })
-                
-                # Resume execution
-                with st.spinner("Processing approved strategy..."):
-                    final_state = valuation_agent.invoke(None, config=config)
-                    if final_state.get("analysis_report"):
-                        report = final_state["analysis_report"]
-                        st.session_state.messages.append({"role": "assistant", "content": report})
-                        st.rerun()
-
-            elif negotiate:
-                # Add user feedback to chat history and REWIND to planner
-                if feedback:
-                    user_msg = {"role": "user", "content": f"Feedback on your plan: {feedback}"}
-                    st.session_state.messages.append(user_msg)
-                    # We need to manually add the message to the state and then invoke starting from planner
-                    valuation_agent.update_state(config, {"messages": [user_msg]})
-                    
-                    with st.spinner("Renegotiating strategy..."):
-                        # By invoking with the config and NO initial state, it resumes. 
-                        # But since we're stuck at the interrupt BEFORE financial_engine, 
-                        # we want to go BACK to analyst_planner.
-                        # In this simple graph, we can just invoke again from START with the updated messages.
-                        current_ticker = state_values.get("ticker", "UNKNOWN")
+        if not ticker_opts:
+            # AUTO-RESUME: Ticker is clear, no need for user intervention
+            with st.spinner("Ticker confirmed. Fetching financials..."):
+                final_state = valuation_agent.invoke(None, config=config)
+                st.rerun()
+        else:
+            # SHOW OPTIONS: Ticker is ambiguous
+            with st.chat_message("assistant"):
+                st.info("🔍 **I found multiple companies that match your request.**")
+                with st.form("disambiguation_form"):
+                    selected_ticker = st.radio("Which one did you mean?", ticker_opts)
+                    if st.form_submit_button("Confirm Selection"):
                         valuation_agent.update_state(config, {
-                            "current_step": "analyst_planner",
-                            "config": st.session_state.llm_config
+                            "ticker": selected_ticker,
+                            "ticker_options": []
                         })
+                        with st.spinner(f"Success! Pulling data for {selected_ticker}..."):
+                            valuation_agent.invoke(None, config=config)
+                            st.rerun()
+
+    # CASE B: Strategy Approval (HITL)
+    elif "financial_engine" in current_snapshot.next:
+        assump = state_values.get("assumptions", {})
+        ticker = state_values.get("ticker", "Stock")
+
+        with st.chat_message("assistant"):
+            st.warning(f"🎯 **Strategy Checkpoint: {ticker} Blueprint**")
+            st.info(f"**Analyst Rationale:** {assump.get('reasoning', 'No reasoning provided.')}")
+            
+            with st.form("approval_form"):
+                st.write("### 🛠️ Modeling Levers")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.write("**Growth & Premium**")
+                    new_growth = st.number_input("Forward Growth (%)", value=float(assump.get("forward_growth", 0.05)*100), step=0.5) / 100
+                    new_term_growth = st.number_input("Terminal Growth (%)", value=float(assump.get("terminal_growth", 0.025)*100), step=0.1) / 100
+                    new_erp = st.number_input("Equity Risk Premium (%)", value=float(assump.get("equity_risk_premium", 0.055)*100), step=0.1) / 100
+                with col2:
+                    st.write("**WACC Inputs**")
+                    new_rf = st.number_input("Risk-Free Rate (%)", value=float(assump.get("risk_free_rate", 0.045)*100), step=0.1) / 100
+                    new_beta = st.number_input("Beta", value=float(assump.get("beta", 1.0)), step=0.05)
+                    new_tax = st.number_input("Tax Rate (%)", value=float(assump.get("tax_rate", 0.25)*100), step=1.0) / 100
+                with col3:
+                    st.write("**Global Settings**")
+                    new_peers = st.text_input("Peer Tickers", value=", ".join(assump.get("peers", [])))
+                    intent = st.selectbox("Depth", ["FULL_VALUATION", "QUICK_INQUIRY"], index=0 if assump.get("intent")=="FULL_VALUATION" else 1)
+                    
+                    h_inv, h_rec = assump.get("haircuts", [0.1, 0.15])
+                    new_h_inv = st.slider("Inventory Haircut", 0.0, 1.0, float(h_inv))
+                    new_h_rec = st.slider("Receivables Haircut", 0.0, 1.0, float(h_rec))
+                
+                feedback = st.text_area("💬 Feedback / Argument (Optional)", placeholder="e.g., 'I think 40% growth is too aggressive, let's use 20% instead.'")
+                
+                btn_col1, btn_col2 = st.columns(2)
+                with btn_col1:
+                    submitted = st.form_submit_button("🚀 Approve & Execute Calculations")
+                with btn_col2:
+                    negotiate = st.form_submit_button("🔄 Negotiate / Update Plan")
+                
+                if submitted:
+                    # Update State with user overrides and move forward
+                    new_assumptions = {
+                        **assump,
+                        "forward_growth": new_growth,
+                        "terminal_growth": new_term_growth,
+                        "equity_risk_premium": new_erp,
+                        "risk_free_rate": new_rf,
+                        "beta": new_beta,
+                        "tax_rate": new_tax,
+                        "peers": [p.strip().upper() for p in new_peers.split(",") if p.strip()],
+                        "haircuts": [new_h_inv, new_h_rec],
+                        "intent": intent
+                    }
+                    valuation_agent.update_state(config, {
+                        "assumptions": new_assumptions,
+                        "config": st.session_state.llm_config
+                    })
+                    
+                    # Resume execution
+                    with st.spinner("Processing approved strategy..."):
                         final_state = valuation_agent.invoke(None, config=config)
-                        st.rerun()
+                        if final_state.get("analysis_report"):
+                            report = final_state["analysis_report"]
+                            st.session_state.messages.append({"role": "assistant", "content": report})
+                            st.rerun()
+
+                elif negotiate:
+                    # Add user feedback to chat history and REWIND to planner
+                    if feedback:
+                        user_msg = {"role": "user", "content": f"Feedback on your plan: {feedback}"}
+                        st.session_state.messages.append(user_msg)
+                        valuation_agent.update_state(config, {"messages": [user_msg]})
+                        
+                        with st.spinner("Renegotiating strategy..."):
+                            valuation_agent.update_state(config, {
+                                "current_step": "analyst_planner",
+                                "config": st.session_state.llm_config
+                            })
+                            final_state = valuation_agent.invoke(None, config=config)
+                            st.rerun()
 
 # 2. Handle New Queries
 if prompt := st.chat_input("Ask about a stock (e.g., 'Valuate AAPL')"):

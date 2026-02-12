@@ -11,9 +11,16 @@ from agent.nodes import (
 )
 
 def route_after_extraction(state: ValuationState):
-    """Routes to retrieval if a ticker was found, otherwise ends."""
-    if state.get("errors") or state.get("ticker") == "UNKNOWN":
+    """Routes to retrieval or ends/clarifies based on extraction success."""
+    if state.get("analysis_report") and "specialized" in state["analysis_report"].lower():
+        return "END" # This was a Scope check failure
+    
+    if state.get("ticker_options"):
+        return "data_retrieval" # This will be interrupted in the UI for clarification
+        
+    if state.get("errors") or state.get("ticker") == "UNKNOWN" or not state.get("ticker"):
         return "END"
+        
     return "data_retrieval"
 
 def route_after_retrieval(state: ValuationState):
@@ -129,7 +136,7 @@ def create_graph():
     # This is the "Blueprint Approval" stop
     app = workflow.compile(
         checkpointer=memory,
-        interrupt_before=["financial_engine"]
+        interrupt_before=["data_retrieval", "financial_engine"]
     )
     return app
 

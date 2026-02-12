@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from agent.state import ValuationState
 from agent.llm_factory import get_llm
-from tools.finance import get_company_data, get_peer_multiples, get_risk_free_rate
+from tools.finance import get_company_data, get_peer_multiples, get_risk_free_rate, search_ticker, verify_ticker
 from tools.calculators import (
     calculate_wacc, 
     calculate_dcf, 
@@ -27,37 +27,78 @@ def get_node_llm(state: ValuationState):
     return get_llm(provider=provider, model_name=model, api_key=api_key)
 
 def ticker_extractor_node(state: ValuationState) -> Dict[str, Any]:
-    """Lightweight extraction of ticker from user query."""
-    print("\n--- [NODE] ticker_extractor_node ---")
-    print(f"LLM provider: {state.get('config', {}).get('provider')}")
-    
+    """Smart Guardrail: Identifies intent, extracts tickers, and discovers them if missing."""
+    print("\n--- [NODE] guardrail_discovery_node ---")
     messages = state.get("messages", [])
     last_message = messages[-1]["content"] if isinstance(messages[-1], dict) else messages[-1].content
     
-    prompt = f"Extract only the stock ticker from this message: '{last_message}'. If none found, respond 'NONE'."
+    prompt = f"""
+    Analyze the user's latest request: "{last_message}"
+    
+    1. VALUATION_QUALIFIED: Is this request related to business valuation, stock analysis, or financial modeling? (YES/NO)
+    2. TICKER_EXTRACTED: Extract any stock ticker mentioned (e.g., AAPL). If it's a company name without a ticker, provide the name.
+    
+    Format:
+    QUALIFIED: [YES/NO]
+    TICKER: [SYMBOL or COMPANY NAME or NONE]
+    """
     
     try:
         llm = get_node_llm(state)
         response = llm.invoke([HumanMessage(content=prompt)])
-        ticker = response.content.strip().upper().replace("$", "").replace("TICKER:", "").strip()
+        lines = response.content.strip().split("\n")
         
-        # If the LLM failed to find a ticker in the LAST message, 
-        # check if we already have a valid ticker in the state (Follow-up case)
-        if ("NONE" in ticker or len(ticker) > 10) and state.get("ticker") and state["ticker"] != "UNKNOWN":
-            print(f"Follow-up detected. Retaining existing ticker: {state['ticker']}")
-            ticker = state["ticker"]
-        elif "NONE" in ticker or len(ticker) > 10:
-            ticker = "UNKNOWN"
+        qualified = "YES" in (lines[0] if len(lines) > 0 else "")
+        raw_ticker = (lines[1] if len(lines) > 1 else "").replace("TICKER:", "").strip().upper()
+        
+        # 1. Scope Guardrail
+        if not qualified:
+            msg = "I'm specialized in business valuation and financial analysis. I'd be happy to help you analyze a stock or valuate a company!"
+            return sanitize_state({
+                "analysis_report": msg,
+                "current_step": "complete" # Exit early
+            })
+            
+        # 2. Extract or Search
+        # Check if extracted 'ticker' is actually a valid ticker
+        found_tickers = []
+        if len(raw_ticker) <= 5 and verify_ticker(raw_ticker):
+            found_tickers = [raw_ticker]
+        elif raw_ticker != "NONE":
+            # It might be a name, let's search
+            found_tickers = search_ticker(raw_ticker, lambda: get_node_llm(state))
+        print(f"Found tickers: {found_tickers}")
+            
+        # 3. Handle Discovery Outcomes
+        if not found_tickers:
+            # Fallback: Maybe we already have a ticker in state and this is just a follow-up?
+            if state.get("ticker") and state["ticker"] != "UNKNOWN":
+                return sanitize_state({"current_step": "data_retrieval"})
+            
+            msg = "I'd love to help you with that valuation! Could you please provide the stock ticker (e.g., AAPL for Apple)? I want to make sure I use the exact financial data."
+            return sanitize_state({
+                "analysis_report": msg,
+                "current_step": "complete"
+            })
+            
+        if len(found_tickers) > 1:
+            # Ambiguity detected!
+            return sanitize_state({
+                "ticker_options": found_tickers,
+                "current_step": "interrupt_clarification" # We'll need to define this in graph
+            })
+            
+        # Success: Single ticker found
+        print(f"Single ticker found: {found_tickers[0]}")
+        return sanitize_state({
+            "ticker": found_tickers[0],
+            "ticker_options": [],
+            "current_step": "data_retrieval"
+        })
             
     except Exception as e:
-        print(f"Ticker Extraction Failed: {e}")
-        ticker = state.get("ticker", "UNKNOWN")
-
-    print(f"Final Ticker: {ticker}")
-    return sanitize_state({
-        "ticker": ticker, 
-        "current_step": "data_retrieval"
-    })
+        print(f"Guardrail Error: {e}")
+        return sanitize_state({"current_step": "data_retrieval"})
 
 
 def data_retrieval_node(state: ValuationState) -> Dict[str, Any]:

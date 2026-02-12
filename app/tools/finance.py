@@ -22,6 +22,41 @@ def get_risk_free_rate() -> float:
         print(f"Error fetching risk-free rate: {e}")
         return 0.04
 
+def verify_ticker(ticker_symbol: str) -> bool:
+    """Checks if a ticker actually exists and has price data."""
+    try:
+        t = yf.Ticker(ticker_symbol)
+        # Check if we can get a price or market cap
+        info = t.info
+        return "currentPrice" in info or "marketCap" in info
+    except:
+        return False
+
+def search_ticker(query: str, llm_factory_func) -> List[str]:
+    """
+    Uses an LLM to find potential tickers for a company name.
+    """
+    prompt = f"""
+    Find the most likely stock ticker symbols for the company: '{query}'.
+    Respond with ONLY a comma-separated list of 1-3 tickers, ordered by relevance.
+    Example: 'Apple' -> 'AAPL'
+    Example: 'Alphabet' -> 'GOOG, GOOGL'
+    If no ticker is likely, respond 'NONE'.
+    """
+    from langchain_core.messages import HumanMessage
+    try:
+        response = llm_factory_func().invoke([HumanMessage(content=prompt)])
+        lines = response.content.strip().upper()
+        if "NONE" in lines: return []
+        import re
+        tickers = re.findall(r"\b[A-Z]{1,5}\b", lines)
+        # Verify them
+        valid_tickers = [t for t in tickers if verify_ticker(t)]
+        return list(dict.fromkeys(valid_tickers)) # Deduplicate
+    except Exception as e:
+        print(f"Ticker search failed: {e}")
+        return []
+
 def get_peers(ticker_symbol: str) -> Dict[str, str]:
     """
     Returns the sector and industry of a company. 
