@@ -105,7 +105,11 @@ def get_company_data(ticker_symbol: str) -> Dict[str, Any]:
             "shares_outstanding": float(info.get("sharesOutstanding", 0)),
             "sector": info.get("sector", "Unknown"),
             "industry": info.get("industry", "Unknown"),
-            "currency": info.get("currency", "USD")
+            "currency": info.get("currency", "USD"),
+            "pe": float(info.get("forwardPE", 0)),
+            "ps": float(info.get("priceToSalesTrailing12Months", 0)),
+            "ev_ebitda": float(info.get("enterpriseToEbitda", 0)),
+            "peg": float(info.get("pegRatio", 0))
         }
 
         # 2. Financial Statements (DataFrames)

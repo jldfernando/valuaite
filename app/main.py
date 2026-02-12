@@ -1,5 +1,8 @@
 import streamlit as st
 import os
+import pandas as pd
+import plotly.graph_objects as go
+import numpy as np
 from dotenv import load_dotenv
 from agent.graph import valuation_agent
 
@@ -11,9 +14,6 @@ st.set_page_config(
     page_icon="🚀",
     layout="wide"
 )
-
-import pandas as pd
-import plotly.graph_objects as go
 
 def display_valuation_results(state):
     """Refactored helper to show the metrics dashboard with tabs and charts."""
@@ -27,18 +27,53 @@ def display_valuation_results(state):
         # --- TAB 1: EXECUTIVE SUMMARY ---
         with tabs[0]:
             st.subheader(f"Valuation Summary: {ticker}")
-            mcol1, mcol2, mcol3, mcol4, mcol5 = st.columns(5)
-            curr_price = state.get("company_data", {}).get("market_info", {}).get("current_price", 0)
+            
+            # --- Intrinsic Metrics ---
+            st.markdown("#### **Intrinsic Valuation** (Target vs. Market Price)")
+            mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+            market_info = state.get("company_data", {}).get("market_info", {})
+            curr_price = market_info.get("current_price", 0)
+            
+            def get_delta(val, price):
+                if price <= 0: return None
+                return f"{(val - price) / price:+.1%}"
+
             with mcol1:
                 st.metric("Current Price", f"${curr_price:.2f}")
             with mcol2:
-                st.metric("DCF Fair Value", f"${res['dcf'].get('implied_share_price', 0):.2f}")
+                val = res['dcf'].get('implied_share_price', 0)
+                st.metric("DCF Fair Value", f"${val:.2f}", delta=get_delta(val, curr_price))
             with mcol3:
-                st.metric("Relative (PE)", f"${res['multiples'].get('pe_implied_price', 0):.2f}")
+                val = res['nav'].get('nav_per_share', 0)
+                st.metric("NAV Per Share", f"${val:.2f}", delta=get_delta(val, curr_price))
             with mcol4:
-                st.metric("NAV Per Share", f"${res['nav'].get('nav_per_share', 0):.2f}")
-            with mcol5:
-                st.metric("Liquidation", f"${res['liquidation'].get('liquidation_per_share', 0):.2f}")
+                val = res['liquidation'].get('liquidation_per_share', 0)
+                st.metric("Liquidation", f"${val:.2f}", delta=get_delta(val, curr_price))
+            
+            st.divider()
+
+            # --- Relative Metrics ---
+            st.markdown("#### **Relative Valuation** (Target vs. Peer Medians)")
+            rcol1, rcol2, rcol3, rcol4 = st.columns(4)
+            peer_aggregated = state.get("peer_data", {}).get("aggregated", {})
+            
+            def get_m_delta(target_val, peer_list):
+                if not peer_list or target_val <= 0: return None
+                median = np.median(peer_list)
+                return f"{target_val - median:+.2f} vs Peer Median"
+
+            with rcol1:
+                val = market_info.get("pe", 0)
+                st.metric("P/E Ratio", f"{val:.2f}", delta=get_m_delta(val, peer_aggregated.get("pe", [])))
+            with rcol2:
+                val = market_info.get("ps", 0)
+                st.metric("P/S Ratio", f"{val:.2f}", delta=get_m_delta(val, peer_aggregated.get("ps", [])))
+            with rcol3:
+                val = market_info.get("ev_ebitda", 0)
+                st.metric("EV/EBITDA", f"{val:.2f}", delta=get_m_delta(val, peer_aggregated.get("ev_ebitda", [])))
+            with rcol4:
+                val = market_info.get("peg", 0)
+                st.metric("PEG Ratio", f"{val:.2f}", delta=get_m_delta(val, peer_aggregated.get("peg", [])))
             
             st.divider()
             
@@ -128,46 +163,76 @@ def display_valuation_results(state):
         with tabs[2]:
             st.subheader("Valuation Visualizations")
             
-            # 1. Football Field Chart (Models + Peers)
-            models = ["Current Price", "DCF", "PE Multiples", "NAV (Asset)", "Liquidation"]
-            prices = [
+            # 1. Intrinsic Football Field
+            st.markdown("### **1. Intrinsic Football Field**")
+            st.caption("Comparing internal cash flows and asset values to the current market price.")
+            i_models = ["Current Price", "DCF", "NAV (Asset)", "Liquidation"]
+            i_prices = [
                 curr_price,
                 res['dcf'].get('implied_share_price', 0),
-                res['multiples'].get('pe_implied_price', 0),
                 res['nav'].get('nav_per_share', 0),
                 res['liquidation'].get('liquidation_per_share', 0)
             ]
-            colors = ['#FFFFFF', '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+            i_colors = ['#FFFFFF', '#1f77b4', '#2ca02c', '#d62728']
             
-            # Add peers to the chart
-            if "peer_data" in res and "raw" in res["peer_data"]:
-                for p in res["peer_data"]["raw"]:
-                    models.append(f"Peer: {p['ticker']}")
-                    prices.append(p.get("price", 0))
-                    colors.append('#9467bd') # Purple for peers
-            
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=prices,
-                y=models,
+            i_fig = go.Figure()
+            i_fig.add_trace(go.Bar(
+                x=i_prices,
+                y=i_models,
                 orientation='h',
-                marker_color=colors,
-                text=[f"${p:.2f}" for p in prices],
+                marker_color=i_colors,
+                text=[f"${p:.2f}" for p in i_prices],
                 textposition='auto'
             ))
-            
-            # Add current price line
             if curr_price > 0:
-                fig.add_vline(x=curr_price, line_dash="dash", line_color="white", 
-                             annotation_text=f"Market: ${curr_price:.2f}", 
-                             annotation_position="top",
-                             annotation_font_color="white")
+                i_fig.add_vline(x=curr_price, line_dash="dash", line_color="white", 
+                              annotation_text=f"Market: ${curr_price:.2f}", annotation_position="top")
+            i_fig.update_layout(title="Intrinsic Valuation vs. Market", xaxis_title="Price ($)", template="plotly_white")
+            st.plotly_chart(i_fig, use_container_width=True)
 
-            fig.update_layout(title="Valuation Comparison vs. Market & Peers", xaxis_title="Price ($)", 
-                             yaxis_title="Methodology / Benchmarks", template="plotly_white", height=400 + (len(models)*20))
-            st.plotly_chart(fig, width='stretch')
+            st.divider()
 
-            # 2. Scenario Comparison Chart (Football Field format)
+            # 2. Relative Multiple Comparison
+            st.markdown("### **2. Industry Multiple Benchmarking**")
+            st.caption("How the target company's valuation ratios compare to industry peers.")
+            
+            if "peer_data" in res and "raw" in res["peer_data"]:
+                m_tabs = st.tabs(["P/E Ratio", "P/S Ratio", "EV/EBITDA", "PEG Ratio"])
+                m_keys = ["pe", "ps", "ev_ebitda", "peg"]
+                m_names = ["P/E Ratio", "P/S Ratio", "EV/EBITDA", "PEG Ratio"]
+                
+                for i, key in enumerate(m_keys):
+                    with m_tabs[i]:
+                        tickers_list = [ticker]
+                        vals_list = [market_info.get(key, 0)]
+                        
+                        for p in res["peer_data"]["raw"]:
+                            if key in p and p[key] > 0:
+                                tickers_list.append(p["ticker"])
+                                vals_list.append(p[key])
+                        
+                        if len(vals_list) > 1:
+                            med_val = np.median(vals_list)
+                            
+                            m_fig = go.Figure()
+                            m_fig.add_trace(go.Bar(
+                                x=vals_list,
+                                y=tickers_list,
+                                orientation='h',
+                                marker_color=['#FFFFFF'] + ['#9467bd']*(len(tickers_list)-1),
+                                text=[f"{v:.2f}" for v in vals_list],
+                                textposition='auto'
+                            ))
+                            m_fig.add_vline(x=med_val, line_dash="dash", line_color="orange", 
+                                          annotation_text=f"Median: {med_val:.2f}", annotation_position="top")
+                            m_fig.update_layout(title=f"Industry {m_names[i]} Comparison", xaxis_title=m_names[i], template="plotly_white")
+                            st.plotly_chart(m_fig, use_container_width=True)
+                        else:
+                            st.warning(f"Insufficient data for {m_names[i]} comparison.")
+            else:
+                st.info("Peer multiple data not available for visualization.")
+
+            # 3. Scenario Comparison Chart (Football Field format)
             if "scenarios" in state and state["scenarios"]:
                 st.divider()
                 st.write("**Scenario Sensitivity Analysis**")
@@ -388,7 +453,7 @@ if prompt := st.chat_input("Ask about a stock (e.g., 'Valuate AAPL')"):
     
     with st.chat_message("user"):
         st.markdown(prompt)
-
+    
     with st.chat_message("assistant"):
         with st.spinner("Processing..."):
             # Prepare state update: we only send the new message
