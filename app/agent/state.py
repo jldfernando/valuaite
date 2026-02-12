@@ -21,6 +21,7 @@ class ValuationState(TypedDict):
     
     # 5. Final Report & Feedback
     analysis_report: str
+    scenarios: Dict[str, Any] # Bull, Base, Bear case results
     
     # 6. Graph Flow & Chat History
     # Annotated with operator.add so messages accumulate instead of overwriting

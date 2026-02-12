@@ -6,7 +6,8 @@ from agent.nodes import (
     data_retrieval_node,
     analyst_planner_node,
     financial_engine_node,
-    analysis_synthesis_node
+    analysis_synthesis_node,
+    scenario_analysis_node
 )
 
 def route_after_extraction(state: ValuationState):
@@ -54,6 +55,12 @@ def route_after_planner(state: ValuationState):
     
     return "financial_engine"
 
+def route_after_synthesis(state: ValuationState):
+    """Allows jumping to scenario analysis from the final state."""
+    if state.get("current_step") == "scenario_analysis":
+        return "scenario_analysis"
+    return "END"
+
 def create_graph():
     """
     Creates the LangGraph state machine with branching and memory.
@@ -66,6 +73,7 @@ def create_graph():
     workflow.add_node("analyst_planner", analyst_planner_node)
     workflow.add_node("financial_engine", financial_engine_node)
     workflow.add_node("analysis_synthesis", analysis_synthesis_node)
+    workflow.add_node("scenario_analysis", scenario_analysis_node)
 
     # 2. Define Edges & Workflow
     workflow.add_edge(START, "ticker_extractor")
@@ -102,7 +110,17 @@ def create_graph():
     
     # Transitions
     workflow.add_edge("financial_engine", "analysis_synthesis")
-    workflow.add_edge("analysis_synthesis", END)
+    
+    workflow.add_conditional_edges(
+        "analysis_synthesis",
+        route_after_synthesis,
+        {
+            "scenario_analysis": "scenario_analysis",
+            "END": END
+        }
+    )
+    
+    workflow.add_edge("scenario_analysis", END)
 
     # 3. Add Persistence (Memory)
     memory = MemorySaver()

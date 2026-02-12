@@ -37,34 +37,50 @@ def get_peers(ticker_symbol: str) -> Dict[str, str]:
     except Exception as e:
         return {"error": str(e)}
 
-def get_peer_multiples(tickers: List[str]) -> Dict[str, List[float]]:
+def get_peer_multiples(tickers: List[str]) -> Dict[str, Any]:
     """
-    Fetches valuation multiples for a list of peer tickers.
-    
-    Args:
-        tickers: List of tickers suggested by the LLM (e.g., ['MSFT', 'GOOGL']).
-        
-    Returns:
-        Dictionary of lists: {'pe': [...], 'ps': [...], 'ev_ebitda': [...], 'peg': [...]}
+    Fetches valuation multiples for peer tickers.
+    Returns both aggregated lists for calculation and raw data for display.
     """
-    multiples = {"pe": [], "ps": [], "ev_ebitda": [], "peg": []}
+    aggregated = {"pe": [], "ps": [], "ev_ebitda": [], "peg": []}
+    raw_peers = []
     
     for t_sym in tickers:
         try:
             t = yf.Ticker(t_sym)
             info = t.info
             
-            # Safely grab multiples, skipping if missng
-            if info.get("forwardPE"): multiples["pe"].append(float(info["forwardPE"]))
-            if info.get("priceToSalesTrailing12Months"): multiples["ps"].append(float(info["priceToSalesTrailing12Months"]))
-            if info.get("enterpriseToEbitda"): multiples["ev_ebitda"].append(float(info["enterpriseToEbitda"]))
-            if info.get("pegRatio"): multiples["peg"].append(float(info["pegRatio"]))
+            peer_item = {"ticker": t_sym}
             
+            # Add price for comparison
+            peer_item["price"] = float(info.get("currentPrice", 0))
+            
+            # Safely grab multiples
+            if info.get("forwardPE"): 
+                val = float(info["forwardPE"])
+                aggregated["pe"].append(val)
+                peer_item["pe"] = val
+            if info.get("priceToSalesTrailing12Months"): 
+                val = float(info["priceToSalesTrailing12Months"])
+                aggregated["ps"].append(val)
+                peer_item["ps"] = val
+            if info.get("enterpriseToEbitda"): 
+                val = float(info["enterpriseToEbitda"])
+                aggregated["ev_ebitda"].append(val)
+                peer_item["ev_ebitda"] = val
+            if info.get("pegRatio"): 
+                val = float(info["pegRatio"])
+                aggregated["peg"].append(val)
+                peer_item["peg"] = val
+                
+            raw_peers.append(peer_item)
         except Exception as e:
             print(f"Skipping {t_sym} due to error: {e}")
-            continue
             
-    return sanitize_value(multiples)
+    return sanitize_value({
+        "aggregated": aggregated,
+        "raw": raw_peers
+    })
 
 
 def get_company_data(ticker_symbol: str) -> Dict[str, Any]:

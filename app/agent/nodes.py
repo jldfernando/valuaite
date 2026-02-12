@@ -21,7 +21,7 @@ load_dotenv()
 def get_node_llm(state: ValuationState):
     """Helper to get the configured LLM for the current node."""
     config = state.get("config", {})
-    provider = config.get("provider", "Gemini")
+    provider = config.get("provider", "Groq")
     model = config.get("model", None)
     api_key = config.get("api_key", None)
     return get_llm(provider=provider, model_name=model, api_key=api_key)
@@ -29,6 +29,7 @@ def get_node_llm(state: ValuationState):
 def ticker_extractor_node(state: ValuationState) -> Dict[str, Any]:
     """Lightweight extraction of ticker from user query."""
     print("\n--- [NODE] ticker_extractor_node ---")
+    print(f"LLM provider: {state.get('config', {}).get('provider')}")
     
     messages = state.get("messages", [])
     last_message = messages[-1]["content"] if isinstance(messages[-1], dict) else messages[-1].content
@@ -39,13 +40,20 @@ def ticker_extractor_node(state: ValuationState) -> Dict[str, Any]:
         llm = get_node_llm(state)
         response = llm.invoke([HumanMessage(content=prompt)])
         ticker = response.content.strip().upper().replace("$", "").replace("TICKER:", "").strip()
-        if "NONE" in ticker or len(ticker) > 10: 
+        
+        # If the LLM failed to find a ticker in the LAST message, 
+        # check if we already have a valid ticker in the state (Follow-up case)
+        if ("NONE" in ticker or len(ticker) > 10) and state.get("ticker") and state["ticker"] != "UNKNOWN":
+            print(f"Follow-up detected. Retaining existing ticker: {state['ticker']}")
+            ticker = state["ticker"]
+        elif "NONE" in ticker or len(ticker) > 10:
             ticker = "UNKNOWN"
+            
     except Exception as e:
         print(f"Ticker Extraction Failed: {e}")
-        ticker = "UNKNOWN"
+        ticker = state.get("ticker", "UNKNOWN")
 
-    print(f"Extracted Ticker: {ticker}")
+    print(f"Final Ticker: {ticker}")
     return sanitize_state({
         "ticker": ticker, 
         "current_step": "data_retrieval"
@@ -187,7 +195,7 @@ def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
 
     except Exception as e:
         print(f"Planning Error: {e}. Using conservative defaults.")
-        fg, erp, haircuts, peers, intent, reasoning = 0.05, 0.055, [0.5, 0.2], [], "FULL_VALUATION", ""
+        fg, tg, erp, beta, tax, haircuts, peers, intent, reasoning = 0.05, 0.02, 0.055, 1.0, 0.25, [0.1, 0.15], [], "FULL_VALUATION", "Fallback to defaults due to planning error."
 
     # Fetch peers
     peer_multiples = get_peer_multiples(peers) if peers else {}
@@ -249,7 +257,12 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
 
     # 2. DCF
     try:
-        recent_fcf = data["cash_flow"]["operating_cash_flow"][0] + data["cash_flow"]["capital_expenditures"][0]
+        # Calculate Historical FCF (usually reversed chronologically in yfinance, so reverse again)
+        hist_ocf = data["cash_flow"]["operating_cash_flow"]
+        hist_capex = data["cash_flow"]["capital_expenditures"]
+        historical_fcf = [ocf + cape for ocf, cape in zip(hist_ocf, hist_capex)]
+        
+        recent_fcf = historical_fcf[0]
         print(f"Running DCF Math (Growth: {assump['forward_growth']:.2%})")
         
         dcf_res = calculate_dcf(
@@ -284,7 +297,7 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
         }
         multi_res = calculate_multiples_valuation(
             target_metrics=target_metrics,
-            peer_multiples=state["peer_data"],
+            peer_multiples=state["peer_data"].get("aggregated", {}),
             shares_outstanding=data["market_info"]["shares_outstanding"]
         )
         print("\nMultiples calculations...")
@@ -342,7 +355,9 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
             "multiples": multi_res,
             "nav": nav_res,
             "liquidation": liq_res,
-            "calculated_wacc": calculated_wacc
+            "calculated_wacc": calculated_wacc,
+            "peer_data": state.get("peer_data", {}),
+            "historical_fcf": historical_fcf
         },
         "current_step": "analysis_synthesis"
     })
@@ -364,16 +379,32 @@ def analysis_synthesis_node(state: ValuationState) -> Dict[str, Any]:
         # This handles cases where the router overrode the intent or the planner was inconsistent.
         is_full_valuation = (intent == "FULL_VALUATION") or ("dcf" in results and results["dcf"].get("implied_share_price", 0) > 0)
 
+        # Prepare chat context for follow-up questions
+        messages = state.get("messages", [])
+        chat_transcript = ""
+        for m in messages[:-1]: # Exclude the current prompt which is handled below
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            chat_transcript += f"{role.upper()}: {content}\n"
+
         if not is_full_valuation:
             prompt = f"""
             Subject: Quick Financial Inquiry for {ticker}
             Current Price: ${curr_price}
             
-            Task:
-            The user has a specific question about {ticker}: "{state['messages'][-1].content if hasattr(state['messages'][-1], 'content') else state['messages'][-1]['content']}"
+            CONVERSATION HISTORY:
+            {chat_transcript}
             
-            Using the available company data (Sector: {data['market_info']['sector']}, Industry: {data['market_info']['industry']}), 
-            provide a professional and concise answer. Do not mention missing DCF models unless strictly necessary.
+            LATEST USER QUESTION:
+            "{state['messages'][-1].get('content') if isinstance(state['messages'][-1], dict) else state['messages'][-1].content}"
+            
+            Using available company data (Sector: {data['market_info'].get('sector')}, Industry: {data['market_info'].get('industry')}), 
+            provide a professional, direct, and CONCISE answer. 
+            
+            STRICT GUIDELINE: 
+            If the user asked for a specific number or metric, respond ONLY with that information and a 1-sentence explanation. 
+            If it is a follow-up question (e.g., "Why?"), use the conversation history to provide context.
+            Do not use a standard report template or mention missing DCF models.
             """
         else:
             wacc = results.get("calculated_wacc", 0.09)
@@ -381,6 +412,9 @@ def analysis_synthesis_node(state: ValuationState) -> Dict[str, Any]:
             Subject: {ticker} Professional Valuation Analysis
             Market Status: Price ${curr_price} | WACC: {wacc:.2%}
             
+            CONVERSATION LOG (FOR CONTEXT):
+            {chat_transcript}
+
             Valuation Models:
             - Intrinsic (DCF) Implied Price: ${results.get('dcf', {}).get('implied_share_price', 0):.2f}
             - Relative (PE) Implied Price: ${results.get('multiples', {}).get('pe_implied_price', 0):.2f}
@@ -408,5 +442,55 @@ def analysis_synthesis_node(state: ValuationState) -> Dict[str, Any]:
         err_msg = f"SYNTHESIS_ERROR: Failed to generate report. {str(e)}"
         print(f"ERROR: {err_msg}")
         return sanitize_state({"errors": [err_msg], "current_step": "error"})
+
+
+def scenario_analysis_node(state: ValuationState) -> Dict[str, Any]:
+    """Generates Bull, Base, and Bear scenarios based on negotiated assumptions."""
+    print("\n--- [NODE] scenario_analysis_node ---")
+    data = state["company_data"]
+    assump = state["assumptions"]
+    results = state["valuation_results"]
+    
+    # Base DCF parameters
+    recent_fcf = data["cash_flow"]["operating_cash_flow"][0] + data["cash_flow"]["capital_expenditures"][0]
+    wacc = results.get("calculated_wacc", 0.09)
+    shares = data["market_info"]["shares_outstanding"]
+    cash = data["balance_sheet"]["total_cash"]
+    debt = data["balance_sheet"]["total_debt"]
+    
+    # Define Scenario Multipliers
+    scenarios = {
+        "Bear Case": {"growth": 0.5, "terminal": 0.8, "wacc_adj": 0.01}, # 50% growth, 80% terminal, +1% WACC
+        "Base Case": {"growth": 1.0, "terminal": 1.0, "wacc_adj": 0.0},
+        "Bull Case": {"growth": 1.5, "terminal": 1.2, "wacc_adj": -0.01} # 150% growth, 120% terminal, -1% WACC
+    }
+    
+    scenario_results = {}
+    
+    for name, adj in scenarios.items():
+        try:
+            res = calculate_dcf(
+                fcf_base=recent_fcf,
+                growth_rates=assump["forward_growth"] * adj["growth"],
+                wacc=wacc + adj["wacc_adj"],
+                terminal_growth=assump["terminal_growth"] * adj["terminal"],
+                shares_outstanding=shares,
+                cash=cash,
+                debt=debt
+            )
+            scenario_results[name] = {
+                "implied_price": res["implied_share_price"],
+                "growth_used": assump["forward_growth"] * adj["growth"],
+                "terminal_used": assump["terminal_growth"] * adj["terminal"],
+                "wacc_used": wacc + adj["wacc_adj"],
+                "assumptions_desc": f"Growth: {adj['growth']}x | Terminal: {adj['terminal']}x | WACC: {adj['wacc_adj']:+.0%}"
+            }
+        except Exception as e:
+            print(f"Error calculating {name}: {e}")
+            
+    return sanitize_state({
+        "scenarios": scenario_results,
+        "current_step": "complete"
+    })
 
 

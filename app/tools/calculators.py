@@ -65,42 +65,56 @@ def calculate_dcf(
     if isinstance(growth_rates, (int, float)):
         growth_rates = [growth_rates] * 5
     
-    def run_projection(g_rates: List[float], discount_rate: float, t_growth: float) -> float:
-        # Prevent division by zero or negative denominator in Gordon Growth
-        safe_discount = max(discount_rate, t_growth + 0.001)
-        
-        projected_fcf = []
-        current_fcf = fcf_base
-        for g in g_rates:
-            current_fcf *= (1 + g)
-            projected_fcf.append(current_fcf)
+    projected_fcf = []
+    current_fcf = fcf_base
+    for g in growth_rates:
+        current_fcf *= (1 + g)
+        projected_fcf.append(current_fcf)
             
-        # Terminal Value
-        terminal_value = (projected_fcf[-1] * (1 + t_growth)) / (safe_discount - t_growth)
-        
-        # Present Value
-        pv_fcf = sum([fcf / (1 + safe_discount)**(i + 1) for i, fcf in enumerate(projected_fcf)])
-        pv_terminal = terminal_value / (1 + safe_discount)**len(projected_fcf)
-        
-        return pv_fcf + pv_terminal
-
-    enterprise_value = run_projection(growth_rates, wacc, terminal_growth)
+    # Terminal Value
+    safe_discount = max(wacc, terminal_growth + 0.001)
+    terminal_value = (projected_fcf[-1] * (1 + terminal_growth)) / (safe_discount - terminal_growth)
+    
+    # Year-by-year Present Value
+    pvs = [fcf / (1 + safe_discount)**(i + 1) for i, fcf in enumerate(projected_fcf)]
+    pv_terminal = terminal_value / (1 + safe_discount)**len(projected_fcf)
+    
+    enterprise_value = sum(pvs) + pv_terminal
     equity_value = enterprise_value + cash - debt
     implied_price = equity_value / shares_outstanding if shares_outstanding > 0 else 0
     
     # Sensitivity Analysis (+/- 1% WACC and Terminal Growth)
+    def run_projection_val(g_rates: List[float], discount_rate: float, t_growth: float) -> float:
+        sd = max(discount_rate, t_growth + 0.001)
+        pfcf = []
+        cur = fcf_base
+        for g in g_rates:
+            cur *= (1 + g)
+            pfcf.append(cur)
+        tv = (pfcf[-1] * (1 + t_growth)) / (sd - t_growth)
+        pv = sum([f / (1 + sd)**(i + 1) for i, f in enumerate(pfcf)])
+        pvt = tv / (1 + sd)**len(pfcf)
+        return pv + pvt
+
     sensitivity = {
-        "wacc_plus_1pct": (run_projection(growth_rates, wacc + 0.01, terminal_growth) + cash - debt) / shares_outstanding if shares_outstanding > 0 else 0,
-        "wacc_minus_1pct": (run_projection(growth_rates, wacc - 0.01, terminal_growth) + cash - debt) / shares_outstanding if shares_outstanding > 0 else 0,
-        "growth_plus_1pct": (run_projection(growth_rates, wacc, terminal_growth + 0.01) + cash - debt) / shares_outstanding if shares_outstanding > 0 else 0,
-        "growth_minus_1pct": (run_projection(growth_rates, wacc, terminal_growth - 0.01) + cash - debt) / shares_outstanding if shares_outstanding > 0 else 0,
+        "wacc_plus_1pct": (run_projection_val(growth_rates, wacc + 0.01, terminal_growth) + cash - debt) / shares_outstanding if shares_outstanding > 0 else 0,
+        "wacc_minus_1pct": (run_projection_val(growth_rates, wacc - 0.01, terminal_growth) + cash - debt) / shares_outstanding if shares_outstanding > 0 else 0,
+        "growth_plus_1pct": (run_projection_val(growth_rates, wacc, terminal_growth + 0.01) + cash - debt) / shares_outstanding if shares_outstanding > 0 else 0,
+        "growth_minus_1pct": (run_projection_val(growth_rates, wacc, terminal_growth - 0.01) + cash - debt) / shares_outstanding if shares_outstanding > 0 else 0,
     }
     
     return {
         "enterprise_value": enterprise_value,
         "equity_value": equity_value,
         "implied_share_price": implied_price,
-        "sensitivity": sensitivity
+        "sensitivity": sensitivity,
+        "projections": {
+            "years": [f"Year {i+1}" for i in range(len(projected_fcf))],
+            "fcf": projected_fcf,
+            "pv_fcf": pvs,
+            "terminal_value": terminal_value,
+            "pv_terminal": pv_terminal
+        }
     }
 
 def calculate_multiples_valuation(

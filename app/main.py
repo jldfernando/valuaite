@@ -12,46 +12,210 @@ st.set_page_config(
     layout="wide"
 )
 
+import pandas as pd
+import plotly.graph_objects as go
+
 def display_valuation_results(state):
-    """Refactored helper to show the metrics dashboard."""
+    """Refactored helper to show the metrics dashboard with tabs and charts."""
     if "valuation_results" in state:
         res = state["valuation_results"]
         assump = state.get("assumptions", {})
+        ticker = state.get("ticker", "Stock")
         
-        with st.expander("📊 View Detailed Calculation Data", expanded=True):
-            st.subheader("Implied Valuation Prices")
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("DCF Implied Price", f"${res['dcf'].get('implied_share_price', 0):.2f}")
-            with col2:
-                pe_price = res['multiples'].get('pe_implied_price', 0)
-                st.metric("PE Implied Price", f"${pe_price:.2f}")
-            with col3:
+        tabs = st.tabs(["📊 Executive Summary", "🧮 Model Details", "📈 Visual Insights"])
+
+        # --- TAB 1: EXECUTIVE SUMMARY ---
+        with tabs[0]:
+            st.subheader(f"Valuation Summary: {ticker}")
+            mcol1, mcol2, mcol3, mcol4, mcol5 = st.columns(5)
+            curr_price = state.get("company_data", {}).get("market_info", {}).get("current_price", 0)
+            with mcol1:
+                st.metric("Current Price", f"${curr_price:.2f}")
+            with mcol2:
+                st.metric("DCF Fair Value", f"${res['dcf'].get('implied_share_price', 0):.2f}")
+            with mcol3:
+                st.metric("Relative (PE)", f"${res['multiples'].get('pe_implied_price', 0):.2f}")
+            with mcol4:
                 st.metric("NAV Per Share", f"${res['nav'].get('nav_per_share', 0):.2f}")
-            with col4:
-                liq_price = res['liquidation'].get('liquidation_per_share', 0)
-                st.metric("Liquidation (Floor)", f"${liq_price:.2f}")
+            with mcol5:
+                st.metric("Liquidation", f"${res['liquidation'].get('liquidation_per_share', 0):.2f}")
             
             st.divider()
             
-            st.subheader("Key Model Assumptions")
-            acol1, acol2, acol3, acol4 = st.columns(4)
-            with acol1:
-                st.metric("WACC (Calculated)", f"{res.get('calculated_wacc', 0):.2%}")
-            with acol2:
-                st.metric("Equity Risk Premium", f"{assump.get('equity_risk_premium', 0):.2%}")
-            with acol3:
-                st.metric("Risk-Free Rate", f"{assump.get('risk_free_rate', 0):.2%}")
-            with acol4:
-                st.metric("Forward Growth", f"{assump.get('forward_growth', 0):.2%}")
+            # Display AI Report if it exists in state
+            if "analysis_report" in state:
+                st.markdown(state["analysis_report"])
             
-            with st.container():
-                st.caption(f"**Peers used for relative valuation:** {', '.join(assump.get('peers', []))}")
-                st.caption(f"**Inventory/Receivables Haircuts:** {assump.get('haircuts', [0,0])}")
+            # Reset Button
+            if st.button("✨ Start New Analysis", key="dash_reset", width='stretch'):
+                import uuid
+                st.session_state.thread_id = str(uuid.uuid4())
+                st.session_state.messages = []
+                st.rerun()
+
+        # --- TAB 2: MODEL DETAILS (The "Excel" View) ---
+        with tabs[1]:
+            st.subheader("Model Inputs & Projections")
             
+            # 1. DCF Table (Historical + Projections)
+            if "dcf" in res and "projections" in res["dcf"]:
+                st.write("**Full FCF Audit (Historical -> Projected)**")
+                proj = res["dcf"]["projections"]
+                hist_fcf = res.get("historical_fcf", [])[::-1] # Reverse to chronological [Oldest -> Newest]
+                
+                # Create combined timeline
+                hist_labels = [f"Y-{len(hist_fcf)-i}" for i in range(len(hist_fcf))]
+                proj_labels = proj["years"]
+                
+                combined_fcf = hist_fcf + proj["fcf"]
+                combined_labels = hist_labels + proj_labels
+                
+                # Types for coloring
+                fcf_types = ["Historical"] * len(hist_fcf) + ["Projected"] * len(proj["fcf"])
+                
+                df_dcf = pd.DataFrame({
+                    "Period": combined_labels,
+                    "Type": fcf_types,
+                    "Free Cash Flow": combined_fcf,
+                })
+                
+                st.dataframe(df_dcf.style.format({
+                    "Free Cash Flow": "${:,.2f}"
+                }), width='stretch', hide_index=True)
+                
+                # Terminal Value Box
+                tcol1, tcol2 = st.columns(2)
+                tcol1.metric("Terminal Value", f"${proj['terminal_value']:,.2f}")
+                tcol2.metric("PV of Terminal Value", f"${proj['pv_terminal']:,.2f}")
+
             st.divider()
-            with st.expander("Raw State Data (JSON)"):
-                st.json(state)
+            
+            # 2. Peer Multiples Table
+            if "peer_data" in res and "raw" in res["peer_data"]:
+                st.write("**Peer Benchmark Analysis**")
+                peers_raw = res["peer_data"]["raw"]
+                df_peers = pd.DataFrame(peers_raw)
+                # Filter to only show key valuation columns if they exist
+                cols = [c for c in ["ticker", "price", "pe", "ps", "ev_ebitda", "peg"] if c in df_peers.columns]
+                if not df_peers.empty:
+                    st.dataframe(df_peers[cols].set_index("ticker").T, width='stretch')
+                
+            st.divider()
+            
+            # 3. Asset-Based Breakdown
+            st.write("**Asset-Based & WACC Parameters**")
+            wcol1, wcol2 = st.columns(2)
+            with wcol1:
+                df_wacc = pd.DataFrame({
+                    "Parameter": ["Risk-Free Rate", "Beta", "Equity Risk Premium", "Cost of Equity", "Tax Rate"],
+                    "Value": [
+                        f"{assump.get('risk_free_rate', 0):.2%}",
+                        f"{assump.get('beta', 1.0):.2f}",
+                        f"{assump.get('equity_risk_premium', 0):.2%}",
+                        f"{res.get('calculated_wacc', 0):.2%}",
+                        f"{assump.get('tax_rate', 0.25):.1%}"
+                    ]
+                })
+                st.table(df_wacc)
+            with wcol2:
+                df_haircuts = pd.DataFrame({
+                    "Asset Class": ["Inventory", "Receivables"],
+                    "Discount (Haircut)": [f"{h:.1%}" for h in assump.get("haircuts", [0.1, 0.15])]
+                })
+                st.table(df_haircuts)
+
+        # --- TAB 3: VISUAL INSIGHTS ---
+        with tabs[2]:
+            st.subheader("Valuation Visualizations")
+            
+            # 1. Football Field Chart (Models + Peers)
+            models = ["Current Price", "DCF", "PE Multiples", "NAV (Asset)", "Liquidation"]
+            prices = [
+                curr_price,
+                res['dcf'].get('implied_share_price', 0),
+                res['multiples'].get('pe_implied_price', 0),
+                res['nav'].get('nav_per_share', 0),
+                res['liquidation'].get('liquidation_per_share', 0)
+            ]
+            colors = ['#FFFFFF', '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+            
+            # Add peers to the chart
+            if "peer_data" in res and "raw" in res["peer_data"]:
+                for p in res["peer_data"]["raw"]:
+                    models.append(f"Peer: {p['ticker']}")
+                    prices.append(p.get("price", 0))
+                    colors.append('#9467bd') # Purple for peers
+            
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=prices,
+                y=models,
+                orientation='h',
+                marker_color=colors,
+                text=[f"${p:.2f}" for p in prices],
+                textposition='auto'
+            ))
+            
+            # Add current price line
+            if curr_price > 0:
+                fig.add_vline(x=curr_price, line_dash="dash", line_color="white", 
+                             annotation_text=f"Market: ${curr_price:.2f}", 
+                             annotation_position="top",
+                             annotation_font_color="white")
+
+            fig.update_layout(title="Valuation Comparison vs. Market & Peers", xaxis_title="Price ($)", 
+                             yaxis_title="Methodology / Benchmarks", template="plotly_white", height=400 + (len(models)*20))
+            st.plotly_chart(fig, width='stretch')
+
+            # 2. Scenario Comparison Chart (Football Field format)
+            if "scenarios" in state and state["scenarios"]:
+                st.divider()
+                st.write("**Scenario Sensitivity Analysis**")
+                s_names = list(state["scenarios"].keys())
+                s_prices = [v["implied_price"] for v in state["scenarios"].values()]
+                s_colors = ['#d62728', '#1f77b4', '#2ca02c'] # Bear (Red), Base (Blue), Bull (Green)
+                
+                # Add Current Price for perspective
+                s_names = ["Current Price"] + s_names
+                s_prices = [curr_price] + s_prices
+                s_colors = ['#FFFFFF'] + s_colors
+                
+                s_fig = go.Figure()
+                s_fig.add_trace(go.Bar(
+                    x=s_prices,
+                    y=s_names,
+                    orientation='h',
+                    marker_color=s_colors,
+                    text=[f"${p:.2f}" for p in s_prices],
+                    textposition='auto'
+                ))
+                
+                # Add market line
+                if curr_price > 0:
+                    s_fig.add_vline(x=curr_price, line_dash="dash", line_color="white")
+                
+                s_fig.update_layout(title="Scenario Sensitivity Comparison", xaxis_title="Implied Price ($)", template="plotly_white")
+                st.plotly_chart(s_fig, width='stretch')
+                
+                # Explicit Assumption Table
+                st.write("**Scenario Assumptions Used:**")
+                scen_data = []
+                for name, vals in state["scenarios"].items():
+                    scen_data.append({
+                        "Scenario": name,
+                        "Assumptions": vals.get("assumptions_desc", "N/A"),
+                        "Implied Price": f"${vals['implied_price']:.2f}"
+                    })
+                st.table(pd.DataFrame(scen_data))
+            else:
+                if st.button("📊 Generate Scenario Sensitivity Charts", width='stretch'):
+                    with st.spinner("Simulating Bull/Bear market conditions..."):
+                        from agent.nodes import scenario_analysis_node
+                        scenario_state = scenario_analysis_node(state)
+                        from agent.graph import valuation_agent
+                        config = {"configurable": {"thread_id": st.session_state.thread_id}}
+                        valuation_agent.update_state(config, {"scenarios": scenario_state["scenarios"]})
+                        st.rerun()
 
 # Sidebar - Settings & About
 with st.sidebar:
@@ -61,7 +225,7 @@ with st.sidebar:
     provider = st.selectbox(
         "Select LLM Provider:",
         ["Gemini", "Groq", "Mistral", "OpenAI"],
-        index=0
+        index=1
     )
     
     # Provider-specific settings
@@ -180,7 +344,10 @@ if current_snapshot.next:
                     "haircuts": [new_h_inv, new_h_rec],
                     "intent": intent
                 }
-                valuation_agent.update_state(config, {"assumptions": new_assumptions})
+                valuation_agent.update_state(config, {
+                    "assumptions": new_assumptions,
+                    "config": st.session_state.llm_config
+                })
                 
                 # Resume execution
                 with st.spinner("Processing approved strategy..."):
@@ -204,12 +371,18 @@ if current_snapshot.next:
                         # we want to go BACK to analyst_planner.
                         # In this simple graph, we can just invoke again from START with the updated messages.
                         current_ticker = state_values.get("ticker", "UNKNOWN")
-                        valuation_agent.update_state(config, {"current_step": "analyst_planner"})
+                        valuation_agent.update_state(config, {
+                            "current_step": "analyst_planner",
+                            "config": st.session_state.llm_config
+                        })
                         final_state = valuation_agent.invoke(None, config=config)
                         st.rerun()
 
 # 2. Handle New Queries
 if prompt := st.chat_input("Ask about a stock (e.g., 'Valuate AAPL')"):
+    # Clear session logic removed to prevent message loss. 
+    # Use the manual 'Clear Session' button in the sidebar or results panel.
+    
     # Add user message to state
     st.session_state.messages.append({"role": "user", "content": prompt})
     
@@ -217,17 +390,18 @@ if prompt := st.chat_input("Ask about a stock (e.g., 'Valuate AAPL')"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Researching and planning..."):
-            initial_state = {
+        with st.spinner("Processing..."):
+            # Prepare state update: we only send the new message
+            # LangGraph handles the merging/appending via the checkpointer
+            state_update = {
                 "messages": [{"role": "user", "content": prompt}],
-                "ticker": "UNKNOWN",
-                "errors": [],
-                "current_step": "start",
-                "config": st.session_state.get("llm_config", {"provider": "Gemini"})
+                "errors": [], # Clear old errors
+                "current_step": "start", # Restart flow
+                "config": st.session_state.llm_config # Pass provider settings
             }
             
-            # This will run until it hits an interrupt or END
-            final_state = valuation_agent.invoke(initial_state, config=config)
+            # This will run from the start node, but will have access to existing state (like 'ticker')
+            final_state = valuation_agent.invoke(state_update, config=config)
             
             # If we hit an interrupt, we just rerun the page to show the form
             if valuation_agent.get_state(config).next:
