@@ -14,6 +14,7 @@ from tools.calculators import (
     calculate_nav, 
     calculate_liquidation_value
 )
+from agent.utils import sanitize_state
 
 load_dotenv()
 
@@ -45,7 +46,10 @@ def ticker_extractor_node(state: ValuationState) -> Dict[str, Any]:
         ticker = "UNKNOWN"
 
     print(f"Extracted Ticker: {ticker}")
-    return {"ticker": ticker, "current_step": "data_retrieval"}
+    return sanitize_state({
+        "ticker": ticker, 
+        "current_step": "data_retrieval"
+    })
 
 
 def data_retrieval_node(state: ValuationState) -> Dict[str, Any]:
@@ -56,26 +60,27 @@ def data_retrieval_node(state: ValuationState) -> Dict[str, Any]:
     if ticker == "UNKNOWN":
         err_msg = "VALUATION_ERROR: I couldn't identify a stock symbol. Please mention a ticker like 'AAPL' or 'TSLA'."
         print(f"ERROR: {err_msg}")
-        return {"errors": [err_msg], "current_step": "error"}
+        return sanitize_state({"errors": [err_msg], "current_step": "error"})
         
     try:
         data = get_company_data(ticker)
         if "error" in data:
-            return {"errors": [f"DATA_ERROR: {data['error']}"], "current_step": "error"}
+            return sanitize_state({"errors": [f"DATA_ERROR: {data['error']}"], "current_step": "error"})
         
-        return {
+        return sanitize_state({
             "company_data": data,
             "current_step": "analyst_planner"
-        }
+        })
     except Exception as e:
-        return {"errors": [f"RUNTIME_ERROR: {str(e)}"], "current_step": "error"}
+        return sanitize_state({"errors": [f"RUNTIME_ERROR: {str(e)}"], "current_step": "error"})
 
 
 def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
     """The 'Brain' - Validates intent and sets the valuation strategy using retrieved data."""
     print("\n--- [NODE] analyst_planner_node ---")
     data = state["company_data"]
-    user_query = state["messages"][-1]["content"] if isinstance(state["messages"][-1], dict) else state["messages"][-1].content
+    user_query = (state["messages"][-1]["content"] if isinstance(state["messages"][-1], dict) 
+                  else state["messages"][-1].content)
     
     # 1. Prepare historical context
     hist_rev = data["income_statement"]["revenue"]
@@ -98,39 +103,54 @@ def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
     - Recent Revenue: {hist_rev}
 
     TASK:
-    1. VALIDATE: Is this question related to business valuation or financial health?
-    2. INTENT: Is this a "FULL_VALUATION" or a "QUICK_INQUIRY"?
+    1. VALIDATE: Is this question related to finance, stock market, or company analysis? (YES/NO)
+    2. INTENT: 
+       - Respond 'FULL_VALUATION' if the user asks for "value", "fair price", "intrinsic worth", "DCF", "PE valuation", "NAV", "liquidation", or a full report.
+       - Respond 'QUICK_INQUIRY' ONLY for simple data lookups (e.g., "What is the beta?", "Who are competitors?", "What sector is this?").
+       - If in doubt, default to 'FULL_VALUATION'.
     3. STRATEGY: Suggest DCF growth, Equity Risk Premium (standard ~0.055), asset haircuts, and 4-6 peer tickers.
 
-    Your response MUST follow this exact format. Do NOT add any preamble, conversational filler, or introductory text. Respond ONLY with the data blocks below.
-    
+    Output format (Strictly no other text):
     VALID: [YES/NO]
     INTENT: [FULL_VALUATION/QUICK_INQUIRY]
     FORWARD_GROWTH: [decimal, e.g. 0.08]
     ERP: [decimal, e.g. 0.055]
     HAIRCUTS: [inventory_decimal, receivables_decimal]
     PEERS: [TICKER1, TICKER2, TICKER3]
-    REASONING: [Brief explanation of your strategy]
+    REASONING: [Brief explanation]
     """
     
     try:
         llm = get_node_llm(state)
         response = llm.invoke([HumanMessage(content=prompt)])
         res_text = response.content.strip()
-        print(f"Planner Response: {res_text[:200]}...")
+        print(f"Planner Response:\n{res_text}")
 
-        # Guardrail logic inside the planner
+        # Guardrail logic
         if "VALID: NO" in res_text:
-            return {"errors": ["I am specialized in financial valuations. Please ask a finance-related question."], "current_step": "error"}
+            return sanitize_state({"errors": ["I am specialized in financial valuations. Please ask a finance-related question."], "current_step": "error"})
 
-        # Extraction
-        fg = float(res_text.split("FORWARD_GROWTH:")[1].strip().split("\n")[0])
-        erp = float(res_text.split("ERP:")[1].strip().split("\n")[0])
-        haircuts_raw = res_text.split("HAIRCUTS:")[1].strip().split("\n")[0].replace("[","").replace("]","")
+        # More robust extraction using regex
+        import re
+        def get_match(pattern, text, default=None):
+            match = re.search(pattern, text)
+            return match.group(1).strip() if match else default
+
+        intent = get_match(r"INTENT:\s*(FULL_VALUATION|QUICK_INQUIRY)", res_text, "FULL_VALUATION")
+        fg_match = get_match(r"FORWARD_GROWTH:\s*([\d\.-]+)", res_text, "0.05")
+        erp_match = get_match(r"ERP:\s*([\d\.-]+)", res_text, "0.055")
+        haircuts_raw = get_match(r"HAIRCUTS:\s*\[?([\s\d\.,\.-]+)\]?", res_text, "0.1, 0.15")
+        peers_raw = get_match(r"PEERS:\s*(.+)", res_text, "")
+        reasoning = get_match(r"REASONING:\s*(.+)", res_text, "No reasoning provided.")
+
+        # Cleanup values
+        fg = float(fg_match)
+        erp = float(erp_match)
         haircuts = [float(h.strip()) for h in haircuts_raw.split(",")]
-        peers = [p.strip() for p in res_text.split("PEERS:")[1].split("\n")[0].strip().split(",")]
-        reasoning = res_text.split("REASONING:")[1].strip().split("\n")[0]
-        intent = "FULL_VALUATION" if "FULL_VALUATION" in res_text else "QUICK_INQUIRY"
+        
+        # Clean peers using regex for ticker patterns (1-5 uppercase chars)
+        peers_extracted = re.findall(r"\b[A-Z]{1,5}\b", peers_raw)
+        peers = [p for p in peers_extracted if p not in ["AND", "THE", "PEERS", "OR", state['ticker']]]
 
         # Logging
         print("\nPlanning results...")
@@ -151,7 +171,7 @@ def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
     print("\nPeer multiples...")
     print(f"Peer Multiples: {peer_multiples}")
 
-    return {
+    return sanitize_state({
         "assumptions": {
             "forward_growth": fg,
             "terminal_growth": 0.025,
@@ -163,7 +183,7 @@ def analyst_planner_node(state: ValuationState) -> Dict[str, Any]:
         },
         "peer_data": peer_multiples,
         "current_step": "financial_engine"
-    }
+    })
 
 
 def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
@@ -290,7 +310,7 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
         nav_res = {"nav_per_share": 0}
         liq_res = {"liquidation_per_share": 0}
     
-    return {
+    return sanitize_state({
         "valuation_results": {
             "dcf": dcf_res,
             "multiples": multi_res,
@@ -299,49 +319,68 @@ def financial_engine_node(state: ValuationState) -> Dict[str, Any]:
             "calculated_wacc": calculated_wacc
         },
         "current_step": "analysis_synthesis"
-    }
+    })
 
 
 def analysis_synthesis_node(state: ValuationState) -> Dict[str, Any]:
-    """LLM summarizes the findings."""
+    """LLM summarizes the findings, handling both full valuations and quick inquiries."""
     print("\n--- [NODE] analysis_synthesis_node ---")
-    results = state["valuation_results"]
+    results = state.get("valuation_results", {})
     ticker = state["ticker"]
+    assump = state.get("assumptions", {})
+    intent = assump.get("intent", "FULL_VALUATION")
     
     try:
-        curr_price = state["company_data"]["market_info"]["current_price"]
-        wacc = results.get("calculated_wacc", 0.09)
+        data = state["company_data"]
+        curr_price = data["market_info"]["current_price"]
         
-        prompt = f"""
-        Subject: {ticker} Professional Valuation Analysis
-        Market Status: Price ${curr_price} | WACC: {wacc:.2%}
-        
-        Valuation Models:
-        - Intrinsic (DCF) Implied Price: ${results['dcf'].get('implied_share_price', 0):.2f}
-        - Relative (PE) Implied Price: ${results['multiples'].get('pe_implied_price', 0):.2f}
-        - Asset-Based (NAV) Per Share: ${results['nav'].get('nav_per_share', 0):.2f}
-        - Liquidation Value (Floor): ${results['liquidation'].get('liquidation_per_share', 0):.2f}
-        
-        Synthesis Task: 
-        Analyze the variance between these models. 
-        1. Compare the Current Price to the DCF and Relative valuations.
-        2. Identify if the stock is trading near its 'Floor' (Liquidation Value).
-        3. Conclude on the Margin of Safety.
-        """
+        # FAIL-SAFE: If we have dcf results but intent was QUICK_INQUIRY, treat as FULL_VALUATION
+        # This handles cases where the router overrode the intent or the planner was inconsistent.
+        is_full_valuation = (intent == "FULL_VALUATION") or ("dcf" in results and results["dcf"].get("implied_share_price", 0) > 0)
+
+        if not is_full_valuation:
+            prompt = f"""
+            Subject: Quick Financial Inquiry for {ticker}
+            Current Price: ${curr_price}
+            
+            Task:
+            The user has a specific question about {ticker}: "{state['messages'][-1].content if hasattr(state['messages'][-1], 'content') else state['messages'][-1]['content']}"
+            
+            Using the available company data (Sector: {data['market_info']['sector']}, Industry: {data['market_info']['industry']}), 
+            provide a professional and concise answer. Do not mention missing DCF models unless strictly necessary.
+            """
+        else:
+            wacc = results.get("calculated_wacc", 0.09)
+            prompt = f"""
+            Subject: {ticker} Professional Valuation Analysis
+            Market Status: Price ${curr_price} | WACC: {wacc:.2%}
+            
+            Valuation Models:
+            - Intrinsic (DCF) Implied Price: ${results.get('dcf', {}).get('implied_share_price', 0):.2f}
+            - Relative (PE) Implied Price: ${results.get('multiples', {}).get('pe_implied_price', 0):.2f}
+            - Asset-Based (NAV) Per Share: ${results.get('nav', {}).get('nav_per_share', 0):.2f}
+            - Liquidation Value (Floor): ${results.get('liquidation', {}).get('liquidation_per_share', 0):.2f}
+            
+            Synthesis Task: 
+            Analyze the variance between these models. 
+            1. Compare the Current Price to the DCF and Relative valuations.
+            2. Identify if the stock is trading near its 'Floor' (Liquidation Value).
+            3. Conclude on the Margin of Safety.
+            """
         
         print("Synthesizing final report with LLM...")
         llm = get_node_llm(state)
         response = llm.invoke([HumanMessage(content=prompt)])
         print("Success: Final report generated.")
         
-        return {
+        return sanitize_state({
             "analysis_report": response.content,
             "messages": [{"role": "assistant", "content": response.content}],
             "current_step": "complete"
-        }
+        })
     except Exception as e:
         err_msg = f"SYNTHESIS_ERROR: Failed to generate report. {str(e)}"
         print(f"ERROR: {err_msg}")
-        return {"errors": [err_msg], "current_step": "error"}
+        return sanitize_state({"errors": [err_msg], "current_step": "error"})
 
 

@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 from typing import Dict, List, Any, Optional
+from agent.utils import sanitize_value
 
 def get_risk_free_rate() -> float:
     """
@@ -63,7 +64,7 @@ def get_peer_multiples(tickers: List[str]) -> Dict[str, List[float]]:
             print(f"Skipping {t_sym} due to error: {e}")
             continue
             
-    return multiples
+    return sanitize_value(multiples)
 
 
 def get_company_data(ticker_symbol: str) -> Dict[str, Any]:
@@ -82,10 +83,10 @@ def get_company_data(ticker_symbol: str) -> Dict[str, Any]:
         
         # 1. Market Info
         market_info = {
-            "current_price": info.get("currentPrice", 0),
-            "market_cap": info.get("marketCap", 0),
-            "beta": info.get("beta", 0),
-            "shares_outstanding": info.get("sharesOutstanding", 0),
+            "current_price": float(info.get("currentPrice", 0)),
+            "market_cap": float(info.get("marketCap", 0)),
+            "beta": float(info.get("beta", 0)) if info.get("beta") is not None else 1.0,
+            "shares_outstanding": float(info.get("sharesOutstanding", 0)),
             "sector": info.get("sector", "Unknown"),
             "industry": info.get("industry", "Unknown"),
             "currency": info.get("currency", "USD")
@@ -99,8 +100,12 @@ def get_company_data(ticker_symbol: str) -> Dict[str, Any]:
         def clean_df(df) -> Dict:
             if df is None or df.empty:
                 return {}
-            # Convert NaN to 0 and get dictionary with string keys (dates)
-            return df.fillna(0).to_dict()
+            # Convert NaN to 0 and ensure standard types
+            # Also convert indices/columns to string to avoid serialization issues (e.g. Timestamp keys)
+            clean = df.fillna(0).astype(float)
+            data_dict = clean.to_dict()
+            # Convert any non-string keys (like Timestamps) to strings
+            return {str(k): v for k, v in data_dict.items()}
 
         # Helper to safely get a value from a DF or default to 0
         def safe_get_annual(df, key, years=5):
@@ -108,10 +113,9 @@ def get_company_data(ticker_symbol: str) -> Dict[str, Any]:
                 return [0.0] * years
             # Return list of values for the last N years
             vals = df.loc[key].tolist()
-            # Clean values: replace nan with 0 and ensure float
+            # Clean values: ensure standard float
             import math
             cleaned_vals = [float(v) if (v is not None and not (isinstance(v, float) and math.isnan(v))) else 0.0 for v in vals]
-            # Pad with 0.0s if less than requested years
             return (cleaned_vals + [0.0] * years)[:years]
 
         # 3. Income Statement Data
@@ -120,19 +124,18 @@ def get_company_data(ticker_symbol: str) -> Dict[str, Any]:
             "ebitda": safe_get_annual(financials, "EBITDA"),
             "net_income": safe_get_annual(financials, "Net Income"),
             "interest_expense": safe_get_annual(financials, "Interest Expense"),
-            "tax_rate": info.get("effectiveTaxRate", 0.25) # Use info or default
+            "tax_rate": float(info.get("effectiveTaxRate", 0.25))
         }
 
         # 4. Balance Sheet Data
-        # Balance sheet usually just needs the most recent for NAV/Liquidation
         bs_data = {
-            "total_cash": info.get("totalCash", 0),
-            "total_debt": info.get("totalDebt", 0),
-            "total_assets": balance_sheet.loc["Total Assets"].iloc[0] if "Total Assets" in balance_sheet.index else 0,
-            "total_liabilities": balance_sheet.loc["Total Liabilities Net Minority Interest"].iloc[0] if "Total Liabilities Net Minority Interest" in balance_sheet.index else 0,
-            "intangible_assets": balance_sheet.loc["Intangible Assets"].iloc[0] if "Intangible Assets" in balance_sheet.index else 0,
-            "inventory": balance_sheet.loc["Inventory"].iloc[0] if "Inventory" in balance_sheet.index else 0,
-            "accounts_receivable": balance_sheet.loc["Receivables"].iloc[0] if "Receivables" in balance_sheet.index else 0,
+            "total_cash": float(info.get("totalCash", 0)),
+            "total_debt": float(info.get("totalDebt", 0)),
+            "total_assets": float(balance_sheet.loc["Total Assets"].iloc[0]) if "Total Assets" in balance_sheet.index else 0.0,
+            "total_liabilities": float(balance_sheet.loc["Total Liabilities Net Minority Interest"].iloc[0]) if "Total Liabilities Net Minority Interest" in balance_sheet.index else 0.0,
+            "intangible_assets": float(balance_sheet.loc["Intangible Assets"].iloc[0]) if "Intangible Assets" in balance_sheet.index else 0.0,
+            "inventory": float(balance_sheet.loc["Inventory"].iloc[0]) if "Inventory" in balance_sheet.index else 0.0,
+            "accounts_receivable": float(balance_sheet.loc["Receivables"].iloc[0]) if "Receivables" in balance_sheet.index else 0.0,
         }
 
         # 5. Cash Flow Data
@@ -141,7 +144,7 @@ def get_company_data(ticker_symbol: str) -> Dict[str, Any]:
             "capital_expenditures": safe_get_annual(cash_flow, "Capital Expenditure")
         }
 
-        return {
+        return sanitize_value({
             "ticker": ticker_symbol,
             "market_info": market_info,
             "income_statement": income_stmt_data,
@@ -150,7 +153,7 @@ def get_company_data(ticker_symbol: str) -> Dict[str, Any]:
             "raw_financials": clean_df(financials), # Including raw for flexibility
             "raw_balance_sheet": clean_df(balance_sheet),
             "raw_cash_flow": clean_df(cash_flow)
-        }
+        })
 
     except Exception as e:
         print(f"Error fetching data for {ticker_symbol}: {e}")

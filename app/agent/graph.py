@@ -1,4 +1,5 @@
 from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
 from agent.state import ValuationState
 from agent.nodes import (
     ticker_extractor_node,
@@ -20,9 +21,37 @@ def route_after_retrieval(state: ValuationState):
         return "END"
     return "analyst_planner"
 
+def route_after_planner(state: ValuationState):
+    """
+    Routes to engine for full valuation, or directly to synthesis for quick inquiries.
+    Added keyword safety check to prevent accidental skips of critical math.
+    """
+    if state.get("errors"):
+        return "END"
+    
+    # 1. Check Intent from the planner
+    intent = state.get("assumptions", {}).get("intent", "FULL_VALUATION")
+    
+    # 2. Safety Check: If user asks for specific math but LLM said QUICK_INQUIRY
+    user_query = ""
+    if state.get("messages"):
+        last_msg = state["messages"][-1]
+        user_query = (last_msg["content"] if isinstance(last_msg, dict) else last_msg.content).lower()
+
+    valuation_keywords = ["valuate", "value", "worth", "dcf", "nav", "pe", "ratio", "multiple", "multiplier", "intrinsic", "fair price", "liquidation"]
+    if intent == "QUICK_INQUIRY" and any(k in user_query for k in valuation_keywords):
+        print(">>> Safety Check: Valuation keywords detected despite QUICK_INQUIRY intent. Overriding to FULL_VALUATION.")
+        intent = "FULL_VALUATION"
+
+    if intent == "QUICK_INQUIRY":
+        print(">>> Quick Inquiry confirmed. Skipping math engine.")
+        return "analysis_synthesis"
+    
+    return "financial_engine"
+
 def create_graph():
     """
-    Creates the LangGraph state machine for the Valuation Agent.
+    Creates the LangGraph state machine with branching and memory.
     """
     workflow = StateGraph(ValuationState)
 
@@ -36,7 +65,6 @@ def create_graph():
     # 2. Define Edges & Workflow
     workflow.add_edge(START, "ticker_extractor")
     
-    # Conditional routing to handle errors early
     workflow.add_conditional_edges(
         "ticker_extractor", 
         route_after_extraction,
@@ -55,13 +83,30 @@ def create_graph():
         }
     )
 
-    # Linear flow for the brain and math
-    workflow.add_edge("analyst_planner", "financial_engine")
+    # Branching logic after the brain
+    workflow.add_conditional_edges(
+        "analyst_planner",
+        route_after_planner,
+        {
+            "financial_engine": "financial_engine",
+            "analysis_synthesis": "analysis_synthesis",
+            "END": END
+        }
+    )
+    
+    # Transitions
     workflow.add_edge("financial_engine", "analysis_synthesis")
     workflow.add_edge("analysis_synthesis", END)
 
-    # Compile the graph
-    app = workflow.compile()
+    # 3. Add Persistence (Memory)
+    memory = MemorySaver()
+    
+    # Compile the graph with an interrupt before math begins
+    # This is the "Blueprint Approval" stop
+    app = workflow.compile(
+        checkpointer=memory,
+        interrupt_before=["financial_engine"]
+    )
     return app
 
 # Initialize the agent

@@ -12,6 +12,47 @@ st.set_page_config(
     layout="wide"
 )
 
+def display_valuation_results(state):
+    """Refactored helper to show the metrics dashboard."""
+    if "valuation_results" in state:
+        res = state["valuation_results"]
+        assump = state.get("assumptions", {})
+        
+        with st.expander("📊 View Detailed Calculation Data", expanded=True):
+            st.subheader("Implied Valuation Prices")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("DCF Implied Price", f"${res['dcf'].get('implied_share_price', 0):.2f}")
+            with col2:
+                pe_price = res['multiples'].get('pe_implied_price', 0)
+                st.metric("PE Implied Price", f"${pe_price:.2f}")
+            with col3:
+                st.metric("NAV Per Share", f"${res['nav'].get('nav_per_share', 0):.2f}")
+            with col4:
+                liq_price = res['liquidation'].get('liquidation_per_share', 0)
+                st.metric("Liquidation (Floor)", f"${liq_price:.2f}")
+            
+            st.divider()
+            
+            st.subheader("Key Model Assumptions")
+            acol1, acol2, acol3, acol4 = st.columns(4)
+            with acol1:
+                st.metric("WACC (Calculated)", f"{res.get('calculated_wacc', 0):.2%}")
+            with acol2:
+                st.metric("Equity Risk Premium", f"{assump.get('equity_risk_premium', 0):.2%}")
+            with acol3:
+                st.metric("Risk-Free Rate", f"{assump.get('risk_free_rate', 0):.2%}")
+            with acol4:
+                st.metric("Forward Growth", f"{assump.get('forward_growth', 0):.2%}")
+            
+            with st.container():
+                st.caption(f"**Peers used for relative valuation:** {', '.join(assump.get('peers', []))}")
+                st.caption(f"**Inventory/Receivables Haircuts:** {assump.get('haircuts', [0,0])}")
+            
+            st.divider()
+            with st.expander("Raw State Data (JSON)"):
+                st.json(state)
+
 # Sidebar - Settings & About
 with st.sidebar:
     st.title("Settings")
@@ -49,6 +90,19 @@ with st.sidebar:
         "api_key": os.getenv(api_key_field)
     }
     
+    # Session Persistence (Thread ID)
+    if "thread_id" not in st.session_state:
+        import uuid
+        st.session_state.thread_id = str(uuid.uuid4())
+    
+    st.caption(f"Thread ID: {st.session_state.thread_id}")
+    
+    if st.button("Clear Session"):
+        import uuid
+        st.session_state.thread_id = str(uuid.uuid4())
+        st.session_state.messages = []
+        st.rerun()
+
     st.divider()
     st.markdown("### Common Queries")
     st.caption("- Valuate Apple (AAPL)")
@@ -68,7 +122,52 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat Input
+# --- AGENT PERSISTENCE LOGIC ---
+config = {"configurable": {"thread_id": st.session_state.thread_id}}
+current_snapshot = valuation_agent.get_state(config)
+
+# 1. Handle Human-in-the-Loop Interrupts
+if current_snapshot.next:
+    state_values = current_snapshot.values
+    assump = state_values.get("assumptions", {})
+    ticker = state_values.get("ticker", "Stock")
+
+    with st.chat_message("assistant"):
+        st.warning(f"🎯 **Strategy Checkpoint: {ticker} Blueprint**")
+        st.write("The analyst has retrieved the data and proposed the following strategy. Review and adjust before we run the math.")
+        
+        with st.form("approval_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                new_growth = st.number_input("Forward Growth Rate (%)", value=float(assump.get("forward_growth", 0.05)*100), step=0.5) / 100
+                new_erp = st.number_input("Equity Risk Premium (%)", value=float(assump.get("equity_risk_premium", 0.055)*100), step=0.1) / 100
+            with col2:
+                new_peers = st.text_input("Peer Tickers (comma separated)", value=", ".join(assump.get("peers", [])))
+                intent = st.selectbox("Valuation Depth", ["FULL_VALUATION", "QUICK_INQUIRY"], index=0 if assump.get("intent")=="FULL_VALUATION" else 1)
+            
+            submitted = st.form_submit_button("🚀 Approve & Execute Calculations")
+            
+            if submitted:
+                # Update State with user overrides
+                new_assumptions = {
+                    **assump,
+                    "forward_growth": new_growth,
+                    "equity_risk_premium": new_erp,
+                    "peers": [p.strip().upper() for p in new_peers.split(",") if p.strip()],
+                    "intent": intent
+                }
+                valuation_agent.update_state(config, {"assumptions": new_assumptions})
+                
+                # Resume execution
+                with st.spinner("Processing approved strategy..."):
+                    final_state = valuation_agent.invoke(None, config=config)
+                    
+                    if final_state.get("analysis_report"):
+                        report = final_state["analysis_report"]
+                        st.session_state.messages.append({"role": "assistant", "content": report})
+                        st.rerun()
+
+# 2. Handle New Queries
 if prompt := st.chat_input("Ask about a stock (e.g., 'Valuate AAPL')"):
     # Add user message to state
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -76,79 +175,35 @@ if prompt := st.chat_input("Ask about a stock (e.g., 'Valuate AAPL')"):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Run the Agent
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing financials and building models..."):
-            try:
-                # Prepare Initial State
-                # Note: 'messages' in state needs to be LangChain compatible format
-                # For the graph, we'll pass a simple dict structure
-                initial_state = {
-                    "messages": [{"role": "user", "content": prompt}],
-                    "ticker": "UNKNOWN",
-                    "errors": [],
-                    "current_step": "start",
-                    "config": st.session_state.get("llm_config", {"provider": "Gemini"})
-                }
-                
-                # Invoke Graph
-                # valuation_agent is the compiled LangGraph object
-                final_state = valuation_agent.invoke(initial_state)
-                
-                # Check for errors
-                if final_state.get("errors"):
-                    response = f"❌ **Error:** {final_state['errors'][-1]}"
-                else:
-                    response = final_state.get("analysis_report", "I couldn't generate a report. Please try again.")
+        with st.spinner("Researching and planning..."):
+            initial_state = {
+                "messages": [{"role": "user", "content": prompt}],
+                "ticker": "UNKNOWN",
+                "errors": [],
+                "current_step": "start",
+                "config": st.session_state.get("llm_config", {"provider": "Gemini"})
+            }
+            
+            # This will run until it hits an interrupt or END
+            final_state = valuation_agent.invoke(initial_state, config=config)
+            
+            # If we hit an interrupt, we just rerun the page to show the form
+            if valuation_agent.get_state(config).next:
+                st.rerun()
+            
+            # Otherwise, handle completion or errors
+            if final_state.get("errors"):
+                st.error(f"❌ Error: {final_state['errors'][-1]}")
+            elif final_state.get("analysis_report"):
+                st.markdown(final_state["analysis_report"])
+                st.session_state.messages.append({"role": "assistant", "content": final_state["analysis_report"]})
+                # Show results dashboard
+                display_valuation_results(final_state)
 
-                # If there are valuation results, show them in a neat expando
-                if "valuation_results" in final_state:
-                    res = final_state["valuation_results"]
-                    assump = final_state.get("assumptions", {})
-                    
-                    with st.expander("📊 View Detailed Calculation Data"):
-                        st.subheader("Implied Valuation Prices")
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("DCF Implied Price", f"${res['dcf'].get('implied_share_price', 0):.2f}")
-                        with col2:
-                            pe_price = res['multiples'].get('pe_implied_price', 0)
-                            st.metric("PE Implied Price", f"${pe_price:.2f}")
-                        with col3:
-                            st.metric("NAV Per Share", f"${res['nav'].get('nav_per_share', 0):.2f}")
-                        with col4:
-                            liq_price = res['liquidation'].get('liquidation_per_share', 0)
-                            st.metric("Liquidation (Floor)", f"${liq_price:.2f}")
-                        
-                        st.divider()
-                        
-                        st.subheader("Key Model Assumptions")
-                        acol1, acol2, acol3, acol4 = st.columns(4)
-                        with acol1:
-                            st.metric("WACC (Calculated)", f"{res.get('calculated_wacc', 0):.2%}")
-                        with acol2:
-                            st.metric("Equity Risk Premium", f"{assump.get('equity_risk_premium', 0):.2%}")
-                        with acol3:
-                            st.metric("Risk-Free Rate", f"{assump.get('risk_free_rate', 0):.2%}")
-                        with acol4:
-                            st.metric("Forward Growth", f"{assump.get('forward_growth', 0):.2%}")
-                        
-                        with st.container():
-                            st.caption(f"**Peers used for relative valuation:** {', '.join(assump.get('peers', []))}")
-                            st.caption(f"**Inventory/Receivables Haircuts:** {assump.get('haircuts', [0,0])}")
-
-                        st.divider()
-                        with st.expander("Raw State Data (JSON)"):
-                            st.json(final_state)
-
-                # Output final analysis
-                st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-
-            except Exception as e:
-                error_msg = f"An unexpected error occurred: {str(e)}"
-                st.error(error_msg)
-                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+# 3. Always show results if they exist in the current snapshot (for persistence)
+if "valuation_results" in current_snapshot.values:
+    display_valuation_results(current_snapshot.values)
 
 st.divider()
 st.caption("Disclaimer: This tool is for research purposes only. Not financial advice.")
