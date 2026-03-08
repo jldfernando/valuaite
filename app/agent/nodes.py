@@ -492,6 +492,7 @@ def analysis_synthesis_node(state: ValuationState) -> Dict[str, Any]:
         llm = get_node_llm(state)
         response = llm.invoke([HumanMessage(content=prompt)])
         print("Success: Final report generated.")
+        print(f"analysis:report: {response.content}")
         
         return sanitize_state({
             "analysis_report": response.content,

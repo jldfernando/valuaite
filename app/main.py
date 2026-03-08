@@ -188,7 +188,7 @@ def display_valuation_results(state):
                 i_fig.add_vline(x=curr_price, line_dash="dash", line_color="white", 
                               annotation_text=f"Market: ${curr_price:.2f}", annotation_position="top")
             i_fig.update_layout(title="Intrinsic Valuation vs. Market", xaxis_title="Price ($)", template="plotly_white")
-            st.plotly_chart(i_fig, use_container_width=True)
+            st.plotly_chart(i_fig, width='stretch')
 
             st.divider()
 
@@ -226,7 +226,7 @@ def display_valuation_results(state):
                             m_fig.add_vline(x=med_val, line_dash="dash", line_color="orange", 
                                           annotation_text=f"Median: {med_val:.2f}", annotation_position="top")
                             m_fig.update_layout(title=f"Industry {m_names[i]} Comparison", xaxis_title=m_names[i], template="plotly_white")
-                            st.plotly_chart(m_fig, use_container_width=True)
+                            st.plotly_chart(m_fig, width='stretch')
                         else:
                             st.warning(f"Insufficient data for {m_names[i]} comparison.")
             else:
@@ -333,10 +333,10 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.markdown("### Common Queries")
+    st.markdown("### Test Prompts Queries")
     st.caption("- Valuate Apple (AAPL)")
     st.caption("- What is Tesla's P/E ratio?")
-    st.caption("- Analyze MSFT based on assets.")
+    st.caption("- Valuate Microsoft (MSFT) and tell me what you think of of their data policy.")
     st.markdown("Data from Yahoo Finance")
 
 # Main UI
@@ -368,6 +368,14 @@ if current_snapshot.next:
             # AUTO-RESUME: Ticker is clear, no need for user intervention
             with st.spinner("Ticker confirmed. Fetching financials..."):
                 final_state = valuation_agent.invoke(None, config=config)
+                # Check if execution completed (no more interrupts)
+                if not valuation_agent.get_state(config).next:
+                    # Execution finished - add report to messages if it exists
+                    if final_state.get("analysis_report"):
+                        st.session_state.messages.append({
+                            "role": "assistant", 
+                            "content": final_state["analysis_report"]
+                        })
                 st.rerun()
         else:
             # SHOW OPTIONS: Ticker is ambiguous
@@ -448,7 +456,7 @@ if current_snapshot.next:
                         if final_state.get("analysis_report"):
                             report = final_state["analysis_report"]
                             st.session_state.messages.append({"role": "assistant", "content": report})
-                            st.rerun()
+                        st.rerun()
 
                 elif negotiate:
                     # Add user feedback to chat history and REWIND to planner
